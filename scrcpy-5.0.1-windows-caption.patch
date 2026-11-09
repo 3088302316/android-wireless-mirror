@@ -1,0 +1,451 @@
+diff --git a/app/meson.build b/app/meson.build
+index 1c2021a..5c70b6a 100644
+--- a/app/meson.build
++++ b/app/meson.build
+@@ -86,6 +86,7 @@ if host_machine.system() == 'windows'
+         'src/util/command.c',
+         'src/sys/win/file.c',
+         'src/sys/win/process.c',
++        'src/sys/win/mirror_caption.c',
+         windows.compile_resources('scrcpy-windows.rc'),
+     ]
+     feature_test_macros += [
+@@ -177,6 +178,9 @@ endif
+ if host_machine.system() == 'windows'
+     dependencies += cc.find_library('mingw32')
+     dependencies += cc.find_library('ws2_32')
++    dependencies += cc.find_library('dwmapi')
++    dependencies += cc.find_library('comctl32')
++    dependencies += cc.find_library('gdi32')
+ endif
+ 
+ check_functions = [
+diff --git a/app/src/fps_counter.c b/app/src/fps_counter.c
+index 1daa42b..6b225a4 100644
+--- a/app/src/fps_counter.c
++++ b/app/src/fps_counter.c
+@@ -1,5 +1,9 @@
+ #include "fps_counter.h"
+ 
++#ifdef _WIN32
++void sc_win_publish_mirror_fps(unsigned fps, unsigned skipped);
++#endif
++
+ #include <assert.h>
+ #include <stdint.h>
+ 
+@@ -48,6 +52,9 @@ static void
+ display_fps(struct sc_fps_counter *counter) {
+     unsigned rendered_per_second =
+         counter->nr_rendered * SC_TICK_FREQ / SC_FPS_COUNTER_INTERVAL;
++#ifdef _WIN32
++    sc_win_publish_mirror_fps(rendered_per_second, counter->nr_skipped);
++#endif
+     if (counter->nr_skipped) {
+         LOGI("%u fps (+%u frames skipped)", rendered_per_second,
+                                             counter->nr_skipped);
+diff --git a/app/src/util/sdl.c b/app/src/util/sdl.c
+index 5bfcdad..e12630b 100644
+--- a/app/src/util/sdl.c
++++ b/app/src/util/sdl.c
+@@ -5,6 +5,10 @@
+ 
+ #include "util/log.h"
+ 
++#ifdef _WIN32
++void sc_sdl_install_mirror_menu(SDL_Window *window);
++#endif
++
+ SDL_Window *
+ sc_sdl_create_window(const char *title, int64_t x, int64_t y, int64_t width,
+                      int64_t height, int64_t flags) {
+@@ -33,6 +37,9 @@ sc_sdl_create_window(const char *title, int64_t x, int64_t y, int64_t width,
+     }
+ 
+     window = SDL_CreateWindowWithProperties(props);
++#ifdef _WIN32
++    if (window) sc_sdl_install_mirror_menu(window);
++#endif
+     SDL_DestroyProperties(props);
+     return window;
+ }
+diff --git a/app/src/sys/win/mirror_caption.c b/app/src/sys/win/mirror_caption.c
+new file mode 100644
+index 0000000..487f074
+--- /dev/null
++++ b/app/src/sys/win/mirror_caption.c
+@@ -0,0 +1,374 @@
++/* Windows non-client caption integration for Android Wireless Mirror. */
++#include <windows.h>
++#include <windowsx.h>
++#include <commctrl.h>
++#include <dwmapi.h>
++#include <stdint.h>
++#include <stdlib.h>
++#include <wchar.h>
++
++#include "util/sdl.h"
++
++void sc_sdl_install_mirror_menu(SDL_Window *window);
++void sc_win_publish_mirror_fps(unsigned fps, unsigned skipped);
++
++#define MIRROR_MENU_MESSAGE (WM_APP + 0x28)
++#define MIRROR_FPS_MESSAGE (WM_APP + 0x29)
++#define MIRROR_RTT_MESSAGE (WM_APP + 0x2A)
++#define MIRROR_MENU_SUBCLASS 1
++#define CAPTION_COLOR RGB(31, 34, 49)
++#define TEXT_COLOR RGB(237, 240, 253)
++
++struct mirror_caption_state {
++    HWND receiver;
++    BOOL show_stats;
++    unsigned fps, skipped;
++    ULONGLONG fps_tick;
++    int rtt;
++};
++
++static PVOID volatile stats_window;
++
++void
++sc_win_publish_mirror_fps(unsigned fps, unsigned skipped) {
++    HWND window = InterlockedCompareExchangePointer(&stats_window, NULL, NULL);
++    if (window) PostMessageW(window, MIRROR_FPS_MESSAGE, fps, skipped);
++}
++
++struct caption {
++    RECT frame, bar, more, minimize, maximize, close;
++};
++
++static BOOL
++read_caption(HWND window, struct caption *c) {
++    if (IsIconic(window)
++            || (GetWindowLongPtrW(window, GWL_STYLE) & WS_CAPTION) != WS_CAPTION
++            || !GetWindowRect(window, &c->frame)) {
++        return FALSE;
++    }
++    TITLEBARINFOEX info = {0};
++    info.cbSize = sizeof(info);
++    SendMessageW(window, 0x033F, 0, (LPARAM) &info); // WM_GETTITLEBARINFOEX
++    c->bar = info.rcTitleBar;
++    POINT client_origin = {0, 0};
++    if (ClientToScreen(window, &client_origin)) c->bar.left = client_origin.x;
++    c->minimize = info.rgrect[2];
++    c->maximize = info.rgrect[3];
++    c->close = info.rgrect[5];
++    if (IsRectEmpty(&c->bar) || IsRectEmpty(&c->minimize)
++            || IsRectEmpty(&c->maximize) || IsRectEmpty(&c->close)) {
++        return FALSE;
++    }
++    c->more = c->minimize;
++    OffsetRect(&c->more, -(c->more.right - c->more.left + 2), 0);
++    return c->more.left > c->bar.left + 26;
++}
++
++static RECT
++relative_rect(const struct caption *c, RECT rect) {
++    OffsetRect(&rect, -c->frame.left, -c->frame.top);
++    return rect;
++}
++
++static void
++draw_button(HDC dc, const struct caption *c, RECT box, POINT cursor,
++            int button, BOOL maximized) {
++    RECT rect = relative_rect(c, box);
++    if (PtInRect(&box, cursor)) {
++        COLORREF color = button == HTCLOSE ? RGB(174, 47, 76) : RGB(65, 59, 105);
++        HBRUSH fill = CreateSolidBrush(color);
++        FillRect(dc, &rect, fill);
++        DeleteObject(fill);
++    }
++
++    int x = (rect.left + rect.right) / 2;
++    int y = (rect.top + rect.bottom) / 2;
++    int r = max(4, (rect.bottom - rect.top) / 5);
++    switch (button) {
++        case HTMENU:
++            for (int i = -1; i <= 1; ++i) {
++                int dot = y + i * r;
++                Ellipse(dc, x - 2, dot - 2, x + 2, dot + 2);
++            }
++            break;
++        case HTMINBUTTON:
++            MoveToEx(dc, x - r, y + 1, NULL);
++            LineTo(dc, x + r + 1, y + 1);
++            break;
++        case HTMAXBUTTON:
++            if (maximized) {
++                MoveToEx(dc, x - r + 3, y - r, NULL);
++                LineTo(dc, x + r + 1, y - r);
++                LineTo(dc, x + r + 1, y + r - 2);
++            }
++            Rectangle(dc, x - r, y - r + (maximized ? 3 : 0),
++                      x + r + (maximized ? -1 : 1), y + r + 1);
++            break;
++        case HTCLOSE:
++            MoveToEx(dc, x - r, y - r, NULL);
++            LineTo(dc, x + r + 1, y + r + 1);
++            MoveToEx(dc, x + r, y - r, NULL);
++            LineTo(dc, x - r - 1, y + r + 1);
++            break;
++    }
++}
++
++static BOOL
++has_fps(const struct mirror_caption_state *state) {
++    return state->fps_tick && GetTickCount64() - state->fps_tick < 3000;
++}
++
++static void
++draw_stats(HDC dc, RECT *title, const struct mirror_caption_state *state) {
++    if (!state->show_stats) return;
++    WCHAR fps[32], rtt[32], summary[72];
++    if (has_fps(state)) swprintf(fps, 32, L"%u FPS", state->fps);
++    else wcscpy(fps, L"-- FPS");
++    if (state->rtt >= 0) swprintf(rtt, 32, L"RTT %d ms", state->rtt);
++    else wcscpy(rtt, L"RTT --");
++    swprintf(summary, 72, L"%ls · %ls", fps, rtt);
++
++    int height = title->bottom - title->top;
++    int available = title->right - title->left;
++    HFONT font = CreateFontW(-max(10, height / 2), 0, 0, 0, FW_SEMIBOLD,
++        FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
++        CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
++    HGDIOBJ original_font = SelectObject(dc, font);
++    SIZE extent;
++    GetTextExtentPoint32W(dc, summary, wcslen(summary), &extent);
++    BOOL compact = extent.cx + 14 + height * 2 > available;
++    if (compact) {
++        HFONT compact_font = CreateFontW(-max(8, (height - 3) * 2 / 5), 0, 0, 0,
++            FW_SEMIBOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
++            CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
++        SelectObject(dc, compact_font);
++        DeleteObject(font);
++        font = compact_font;
++        SIZE top, bottom;
++        GetTextExtentPoint32W(dc, fps, wcslen(fps), &top);
++        GetTextExtentPoint32W(dc, rtt, wcslen(rtt), &bottom);
++        extent.cx = max(top.cx, bottom.cx);
++    }
++    if (extent.cx + 14 <= available) {
++        RECT pill = {title->right - extent.cx - 14, title->top + 1,
++                     title->right, title->bottom - 1};
++        HBRUSH brush = CreateSolidBrush(RGB(37, 58, 70));
++        HGDIOBJ previous_brush = SelectObject(dc, brush);
++        HGDIOBJ previous_pen = SelectObject(dc, GetStockObject(NULL_PEN));
++        RoundRect(dc, pill.left, pill.top, pill.right, pill.bottom, 10, 10);
++        SelectObject(dc, previous_pen);
++        SelectObject(dc, previous_brush);
++        DeleteObject(brush);
++        SetTextColor(dc, RGB(158, 239, 218));
++        UINT flags = DT_SINGLELINE | DT_VCENTER | DT_CENTER | DT_NOPREFIX;
++        if (compact) {
++            RECT top = pill, bottom = pill;
++            top.bottom = bottom.top = (pill.top + pill.bottom) / 2;
++            DrawTextW(dc, fps, -1, &top, flags);
++            DrawTextW(dc, rtt, -1, &bottom, flags);
++        } else {
++            DrawTextW(dc, summary, -1, &pill, flags);
++        }
++        title->right = pill.left - 8;
++    }
++    SelectObject(dc, original_font);
++    DeleteObject(font);
++}
++
++static void
++paint_caption(HWND window, const struct mirror_caption_state *state) {
++    struct caption c;
++    if (!IsWindowVisible(window) || !read_caption(window, &c)) {
++        return;
++    }
++    HDC dc = GetWindowDC(window);
++    if (!dc) {
++        return;
++    }
++
++    RECT bar = relative_rect(&c, c.bar);
++    RECT client;
++    POINT origin = {0, 0};
++    if (GetClientRect(window, &client) && ClientToScreen(window, &origin)) {
++        OffsetRect(&client, origin.x - c.frame.left, origin.y - c.frame.top);
++        ExcludeClipRect(dc, client.left, client.top, client.right, client.bottom);
++    } else {
++        ReleaseDC(window, dc);
++        return;
++    }
++    RECT frame = relative_rect(&c, c.frame);
++    HBRUSH fill = CreateSolidBrush(CAPTION_COLOR);
++    FillRect(dc, &frame, fill);
++    HBRUSH border = CreateSolidBrush(RGB(65, 67, 87));
++    FrameRect(dc, &frame, border);
++    DeleteObject(border);
++    DeleteObject(fill);
++    POINT cursor = {0};
++    GetCursorPos(&cursor);
++
++    int icon_size = (bar.bottom - bar.top) * 2 / 3;
++    HICON icon = (HICON) SendMessageW(window, WM_GETICON, ICON_SMALL2, 0);
++    if (!icon) icon = (HICON) GetClassLongPtrW(window, GCLP_HICONSM);
++    if (!icon) icon = (HICON) SendMessageW(window, WM_GETICON, ICON_BIG, 0);
++    if (icon) {
++        DrawIconEx(dc, bar.left + 5, (bar.top + bar.bottom - icon_size) / 2,
++                   icon, icon_size, icon_size, 0, NULL, DI_NORMAL);
++    }
++    WCHAR title[256];
++    GetWindowTextW(window, title, sizeof(title) / sizeof(*title));
++    RECT text = bar;
++    text.left += icon ? icon_size + 12 : 8;
++    text.right = c.more.left - c.frame.left - 6;
++    HFONT font = CreateFontW(-(bar.bottom - bar.top) * 3 / 5, 0, 0, 0,
++                             FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
++                             OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
++                             CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
++    HGDIOBJ old_font = SelectObject(dc, font);
++    SetBkMode(dc, TRANSPARENT);
++    draw_stats(dc, &text, state);
++    SetTextColor(dc, TEXT_COLOR);
++    if (text.right > text.left) {
++        DrawTextW(dc, title, -1, &text, DT_SINGLELINE | DT_VCENTER
++                                      | DT_END_ELLIPSIS | DT_NOPREFIX);
++    }
++    SelectObject(dc, old_font);
++    DeleteObject(font);
++
++    HPEN pen = CreatePen(PS_SOLID, 1, TEXT_COLOR);
++    HBRUSH dots = CreateSolidBrush(TEXT_COLOR);
++    HGDIOBJ old_pen = SelectObject(dc, pen);
++    HGDIOBJ old_brush = SelectObject(dc, dots);
++    draw_button(dc, &c, c.more, cursor, HTMENU, FALSE);
++    SelectObject(dc, GetStockObject(NULL_BRUSH));
++    draw_button(dc, &c, c.minimize, cursor, HTMINBUTTON, FALSE);
++    draw_button(dc, &c, c.maximize, cursor, HTMAXBUTTON, IsZoomed(window));
++    draw_button(dc, &c, c.close, cursor, HTCLOSE, FALSE);
++    SelectObject(dc, old_brush);
++    SelectObject(dc, old_pen);
++    DeleteObject(dots);
++    DeleteObject(pen);
++    ReleaseDC(window, dc);
++}
++
++static void
++show_menu(HWND window, struct mirror_caption_state *state) {
++    struct caption c;
++    if (!read_caption(window, &c)) return;
++    HMENU menu = CreatePopupMenu();
++    if (!menu) return;
++    AppendMenuW(menu, MF_STRING, 1, L"设备管理");
++    AppendMenuW(menu, MF_STRING, 2, L"快捷键");
++    AppendMenuW(menu, MF_STRING, 3, L"连接设置");
++    AppendMenuW(menu, MF_SEPARATOR, 0, NULL);
++    AppendMenuW(menu, MF_STRING, 4, L"断开并返回主菜单");
++    AppendMenuW(menu, MF_SEPARATOR, 0, NULL);
++    AppendMenuW(menu, MF_STRING | (state->show_stats ? MF_CHECKED : MF_UNCHECKED),
++                5, L"显示实时统计");
++    if (state->show_stats) {
++        WCHAR detail[96];
++        if (has_fps(state)) {
++            swprintf(detail, 96, L"画面 %u FPS，最近一秒跳过 %u 帧", state->fps, state->skipped);
++        } else wcscpy(detail, L"画面帧率采样中");
++        AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, detail);
++        if (state->rtt >= 0) swprintf(detail, 96, L"网络往返 RTT %d ms", state->rtt);
++        else wcscpy(detail, L"网络往返 RTT 未测得");
++        AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, detail);
++    }
++    UINT selected = TrackPopupMenuEx(menu, TPM_RETURNCMD | TPM_NONOTIFY
++                                    | TPM_RIGHTALIGN,
++                                    c.more.right, c.bar.bottom, window, NULL);
++    DestroyMenu(menu);
++    if (!IsWindow(window)) return;
++    if (selected == 4) {
++        PostMessageW(window, WM_CLOSE, 0, 0);
++    } else if (selected == 5) {
++        state->show_stats = !state->show_stats;
++    } else if (selected >= 1 && selected <= 3) {
++        PostMessageW(state->receiver, MIRROR_MENU_MESSAGE, selected, (LPARAM) window);
++    }
++    paint_caption(window, state);
++}
++
++static LRESULT CALLBACK
++caption_proc(HWND window, UINT message, WPARAM wparam, LPARAM lparam,
++             UINT_PTR id, DWORD_PTR data) {
++    struct mirror_caption_state *state = (void *) data;
++    switch (message) {
++        case MIRROR_FPS_MESSAGE:
++            state->fps = (unsigned) wparam;
++            state->skipped = (unsigned) lparam;
++            state->fps_tick = GetTickCount64();
++            if (state->show_stats) paint_caption(window, state);
++            return 0;
++        case MIRROR_RTT_MESSAGE:
++            state->rtt = (int) (intptr_t) wparam;
++            if (state->show_stats) paint_caption(window, state);
++            return 0;
++        case WM_NCHITTEST: {
++            struct caption c;
++            POINT point = {GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
++            if (read_caption(window, &c) && PtInRect(&c.more, point)) {
++                return HTMENU;
++            }
++            break;
++        }
++        case WM_NCLBUTTONDOWN:
++            if (wparam == HTMENU) {
++                show_menu(window, state);
++                return 0;
++            }
++            break;
++        case WM_NCMOUSEMOVE: {
++            TRACKMOUSEEVENT tracking = {sizeof(tracking),
++                                        TME_LEAVE | TME_NONCLIENT, window, 0};
++            TrackMouseEvent(&tracking);
++            break;
++        }
++        case WM_NCDESTROY:
++            InterlockedCompareExchangePointer(&stats_window, NULL, window);
++            RemoveWindowSubclass(window, caption_proc, id);
++            free(state);
++            return DefSubclassProc(window, message, wparam, lparam);
++    }
++
++    LRESULT result = DefSubclassProc(window, message, wparam, lparam);
++    switch (message) {
++        case WM_NCPAINT:
++        case WM_NCACTIVATE:
++        case WM_NCMOUSEMOVE:
++        case WM_NCMOUSELEAVE:
++        case WM_WINDOWPOSCHANGED:
++        case 0x02E0: // WM_DPICHANGED
++        case WM_SETTEXT:
++            paint_caption(window, state);
++            break;
++    }
++    return result;
++}
++
++void
++sc_sdl_install_mirror_menu(SDL_Window *window) {
++    WCHAR value[32];
++    DWORD length = GetEnvironmentVariableW(L"ANDROID_MIRROR_MENU_WINDOW", value,
++                                          sizeof(value) / sizeof(*value));
++    if (!length || length >= sizeof(value) / sizeof(*value)) return;
++    HWND receiver = (HWND) (uintptr_t) wcstoull(value, NULL, 10);
++    if (!IsWindow(receiver)) return;
++
++    SDL_PropertiesID props = SDL_GetWindowProperties(window);
++    HWND hwnd = SDL_GetPointerProperty(props, SDL_PROP_WINDOW_WIN32_HWND_POINTER,
++                                       NULL);
++    if (!hwnd) return;
++    struct mirror_caption_state *state = calloc(1, sizeof(*state));
++    if (!state) return;
++    state->receiver = receiver;
++    state->show_stats = TRUE;
++    state->rtt = -1;
++    if (SetWindowSubclass(hwnd, caption_proc, MIRROR_MENU_SUBCLASS, (DWORD_PTR) state)) {
++        InterlockedExchangePointer(&stats_window, hwnd);
++        // Paint the real non-client area and let Windows retain move, resize and system buttons.
++        int policy = DWMNCRP_DISABLED;
++        DwmSetWindowAttribute(hwnd, DWMWA_NCRENDERING_POLICY, &policy, sizeof(policy));
++        RedrawWindow(hwnd, NULL, NULL, RDW_INVALIDATE | RDW_FRAME);
++    } else free(state);
++}
