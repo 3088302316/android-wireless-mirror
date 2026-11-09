@@ -1,4 +1,4 @@
-安卓无线投屏便携版（Windows 10 22H2 / Windows 11 x64）
+﻿安卓无线投屏便携版（Windows 10 22H2 / Windows 11 x64）
 
 1. 完整解压 ZIP。双击「安卓无线投屏.exe」。启动后先显示设备列表，选中手机，再点「打开投屏」或双击设备。
 2. 首次使用时，电脑和手机连接同一个 Wi-Fi。在手机开发者选项开启「无线调试」。电脑点「扫码配对」，用手机的「使用二维码配对设备」扫描。也可以点「六位码配对」，输入手机配对弹窗里的地址和六位码。
@@ -61,7 +61,7 @@ F2 回手机主页；F3 最近任务；F4 展开通知栏，再按一次进入�
 每位接收者用自己的手机首次配对即可。压缩包只含程序和依赖，不含配对信息、设备历史或私人配置。
 
 源码与第三方
-本目录内的 .cs 文件是设备中心、地址输入、配对和连接设置源码；app.manifest 是 Win32 清单，AssemblyInfo.cs 是版本信息。
+设备中心和连接逻辑的源码可在项目仓库中查看。
 上游 scrcpy 5.0.1 https://github.com/Genymobile/scrcpy
 声音说明 https://github.com/Genymobile/scrcpy/blob/v5.0.1/doc/audio.md
 Android 无线调试 https://developer.android.com/tools/adb#connect-to-a-device-over-wi-fi

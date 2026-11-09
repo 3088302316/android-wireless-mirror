@@ -1,11 +1,12 @@
 ﻿param(
-    [string]$RuntimeDirectory = (Join-Path $PSScriptRoot 'runtime')
+    [string]$RuntimeDirectory = (Join-Path $PSScriptRoot 'runtime'),
+    [string]$OutputDirectory = (Join-Path $PSScriptRoot 'dist')
 )
 $ErrorActionPreference = 'Stop'
 
 $compiler = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
 if (!(Test-Path -LiteralPath $compiler)) { throw 'The .NET Framework x64 C# compiler is required.' }
-$out = Join-Path $PSScriptRoot 'dist'
+$out = [IO.Path]::GetFullPath($OutputDirectory)
 $runtime = (Resolve-Path -LiteralPath $RuntimeDirectory).Path
 $manifest = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'runtime.sha256') -Encoding UTF8
 $runtimeFiles = foreach ($row in $manifest) {

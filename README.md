@@ -1,38 +1,39 @@
 # 安卓无线投屏
 
-面向 Windows 10 22H2 x64 和 Windows 11 x64 的安卓投屏工具。支持扫码和六位码无线配对、多设备独立投屏、手机熄屏、断线重连，以及实时渲染帧率和网络往返时间。
+在 Windows 上通过 Wi-Fi 查看并操作安卓手机。同一台电脑可以同时打开多台手机，每台设备对应一个独立窗口。
 
-## 构建与运行
+**[下载 Windows 安装包或便携版](https://github.com/3088302316/android-wireless-mirror/releases/latest)** · Windows 10 22H2 x64 / Windows 11 x64
 
-使用 Windows 自带的 .NET Framework 4.x x64 C# 编译器。用 PowerShell 执行：
+| 文件 | 用法 |
+| --- | --- |
+| `android-wireless-mirror-setup-x64.exe` | 双击安装。可以自选目录，开始菜单提供两种声音模式。 |
+| `android-wireless-mirror-portable-x64.zip` | 完整解压后双击启动。保留同目录中的 DLL 和其他依赖。 |
+
+## 首次连接
+
+1. 电脑和手机连接同一个 Wi-Fi，在手机的开发者选项里开启「无线调试」。
+2. 在电脑端选「扫码配对」或「六位码配对」。手动配对时，地址、端口和配对码均取自手机的配对弹窗。
+3. 在设备列表里选中手机，点击「打开投屏」。需要同时显示第二台手机时，回到设备列表再打开它。
+
+默认入口把媒体声音传到电脑。「手机出声」入口把声音留在手机上。窗口菜单提供熄屏、快捷键和画质设置，分辨率、帧率上限和码率可以独立调整。标题栏显示实际渲染帧率和网络往返时间，后者只衡量电脑与手机之间的网络往返。
+
+手机需支持 Android 11 起提供的 ADB 无线调试。输入控制和声音转发受机型及系统限制。更多操作见 [使用说明](使用说明.txt)。
+
+## 从源码构建
+
+在 Windows PowerShell 运行以下命令。新检出时，先从对应的私有发布下载便携 ZIP，脚本会校验并提取构建所需的依赖。已有有效 `runtime/` 可直接构建。
 
 ```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\restore-runtime.ps1 -Archive "C:\Downloads\android-wireless-mirror-portable-x64.zip"
 powershell -NoProfile -ExecutionPolicy Bypass -File .\build.ps1
 ```
 
-运行文件生成在 `dist/`，有电脑出声和手机出声两个入口。运行方法见 [使用说明](使用说明.txt)。
-
-构建脚本默认从本地 `runtime/` 读取依赖，并按 `runtime.sha256` 校验。移到新电脑时，可解压与本源码对应的便携版，再向 `build.ps1` 传入 `-RuntimeDirectory` 指定解压目录。
-
-## 源码和依赖
-
-- C# WinForms 启动器和设备管理界面使用 AntdUI 2.4.18，二维码使用 QRCoder 1.8.1，图标使用 Lucide 0.468.0。
-- 投屏内核基于 scrcpy v5.0.1，基线提交为 `a60891aea193d92e7e5c3942700eca63f9d19a5f`。标题栏菜单和实时帧率的改动见 [scrcpy 补丁](scrcpy-5.0.1-windows-caption.patch)。编译投屏内核前，在该基线的干净源码树应用此补丁。
-- 依赖许可见本目录的 `*-LICENSE.txt`。 `LICENSE.txt` 为 scrcpy 上游许可。
-- 设备历史、连接设置和日志存于 `%LOCALAPPDATA%\AndroidWirelessMirror`。本地运行依赖和构建产物由 Git 忽略。
-
-## 本机入口
-
-在 `runtime` 目录可直接打开投屏，当前便携版在 `发布` 目录。
-
-## Windows 安装包
-
-双击 `发布\安卓无线投屏-安装程序-Windows-x64.exe`，选择安装位置。开始菜单提供电脑出声和手机出声两个入口，桌面入口可在安装时选择。可从 Windows 的「已安装的应用」卸载。
-
-维护者可以使用 Inno Setup 6.7.4 或兼容版本重新生成安装包：
+主程序使用 .NET Framework x64 C# 编译器，输出在 `dist/`。生成安装包及便携包需要 Inno Setup 6.7.4：
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\build-installer.ps1 -IsccPath "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
 ```
 
-构建需要 `runtime.sha256` 对应的运行依赖。可用 `-LanguageFile` 指定 Inno Setup 的中文语言文件。
+发布包输出到 `发布/`。可用 `-LanguageFile` 指定安装器语言文件。设备历史、设置及日志保存在 `%LOCALAPPDATA%\AndroidWirelessMirror`。
+
+设备中心基于 C# WinForms、AntdUI 2.4.18 和 QRCoder 1.8.1，图标来自 Lucide 0.468.0。投屏内核基于 scrcpy v5.0.1，基线提交为 `a60891aea193d92e7e5c3942700eca63f9d19a5f`。重建内核时，在该基线应用 [Windows 标题栏补丁](scrcpy-5.0.1-windows-caption.patch)。第三方许可随发布包附带。
