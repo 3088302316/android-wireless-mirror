@@ -50,6 +50,7 @@ internal sealed class DeviceSettings : Form
     private bool loaded;
     public event Action<DeviceRecord> OpenRequested;
     public event Action<DeviceRecord> RenameApplied;
+    public event Action<DeviceRecord, ConnectionProfile> SettingsSaved;
     public Func<DeviceRecord, string> StreamStatus;
     public ConnectionProfile SavedProfile { get; private set; }
 
@@ -911,7 +912,15 @@ internal sealed class DeviceSettings : Form
         draft.Save();
         profileStatus.Text = "连接设置已保存。";
         profileStatus.ForeColor = WindowTheme.Green;
-        if (active != null) { SavedProfile = draft.Copy(); DialogResult = DialogResult.OK; }
+        if (active != null)
+        {
+            SavedProfile = draft.Copy();
+            DialogResult = DialogResult.OK;
+            return;
+        }
+        var selected = Current();
+        if (selected == null) selected = rows.FirstOrDefault(item => item.Online);
+        if (selected != null && SettingsSaved != null) SettingsSaved(selected, draft.Copy());
     }
 
     private DeviceRecord SelectedOnlineDevice()

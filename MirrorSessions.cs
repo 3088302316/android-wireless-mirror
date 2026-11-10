@@ -17,6 +17,7 @@ internal sealed class MirrorSessions : IDisposable
         public Process Process;
         public Form Recovery;
         public bool HasWindow;
+        public bool RestartRequested;
     }
 
     private readonly Dictionary<string, Session> sessions = new Dictionary<string, Session>(StringComparer.Ordinal);
@@ -44,6 +45,7 @@ internal sealed class MirrorSessions : IDisposable
         this.center = center;
         center.OpenRequested += Open;
         center.RenameApplied += UpdateTitle;
+        center.SettingsSaved += ApplySavedProfile;
         center.StreamStatus = Status;
         center.FormClosed += delegate { Dispose(); };
         activation.Tick += delegate { if (openSettings.WaitOne(0)) ShowCenter(); };
@@ -176,9 +178,12 @@ internal sealed class MirrorSessions : IDisposable
                                 WirelessMirror.FocusWindow(WirelessMirror.MirrorWindow(mirror));
                                 return;
                             }
-                            if (!mirror.HasExited && !mirror.CloseMainWindow())
-                                throw new InvalidOperationException("无法关闭当前窗口，请稍后重试。");
                             replacement = chosen;
+                            AppLog.Info("连接设置已变化，重启当前投屏: " + device.Name);
+                            // CloseMainWindow() can be ignored by the custom scrcpy
+                            // window; Stop() guarantees the old process is gone
+                            // before the loop starts the new profile.
+                            Stop(mirror);
                         }
                     }, signal);
                     exitCode = mirror.ExitCode;
@@ -193,6 +198,13 @@ internal sealed class MirrorSessions : IDisposable
 
             AppLog.Info("scrcpy 退出: " + device.Name + " / " + exitCode + " / " + elapsed.ElapsedMilliseconds + "ms");
             if (closing) return;
+            if (session.RestartRequested)
+            {
+                session.RestartRequested = false;
+                retries = 2;
+                center.RefreshStreamStatus();
+                continue;
+            }
             if (replacement != null)
             {
                 session.Profile = replacement;
@@ -258,6 +270,25 @@ internal sealed class MirrorSessions : IDisposable
         int cascadeX = Math.Max(work.Left, Math.Min(work.Right - width, bounds.Left + offset));
         int cascadeY = Math.Max(work.Top, Math.Min(work.Bottom - height, y + offset));
         SetWindowPos(window, IntPtr.Zero, cascadeX, cascadeY, 0, 0, 0x15);
+    }
+
+    private void ApplySavedProfile(DeviceRecord device, ConnectionProfile profile)
+    {
+        if (closing || device == null || device.Id == null || profile == null) return;
+        Session session;
+        if (!sessions.TryGetValue(device.Id, out session)) return;
+        if (session.Profile.Options == profile.Options)
+        {
+            session.Profile = profile;
+            return;
+        }
+        session.Profile = profile.Copy();
+        if (session.Process != null && !session.Process.HasExited)
+        {
+            session.RestartRequested = true;
+            AppLog.Info("设备中心设置已变化，重启投屏: " + device.Name);
+            Stop(session.Process);
+        }
     }
 
     private void ShowCenter()
