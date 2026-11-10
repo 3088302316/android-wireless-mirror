@@ -27,12 +27,25 @@ $refs += @('AntdUI.dll','QRCoder.dll') | ForEach-Object { '/r:' + (Join-Path $ru
 $sources = Get-ChildItem -LiteralPath $PSScriptRoot -Filter '*.cs' -File | ForEach-Object FullName
 $icon = Join-Path $PSScriptRoot '投屏.ico'
 $manifestPath = Join-Path $PSScriptRoot 'app.manifest'
-$common = @('/nologo','/target:winexe','/platform:x64','/langversion:5','/codepage:65001','/optimize+',
-    "/win32icon:$icon","/win32manifest:$manifestPath")
-& $compiler @common @refs ('/out:' + (Join-Path $out '安卓无线投屏.exe')) @sources
-if ($LASTEXITCODE -ne 0) { throw 'Desktop-audio build failed.' }
-& $compiler @common @refs /define:PHONE_AUDIO ('/out:' + (Join-Path $out '安卓无线投屏-手机出声.exe')) @sources
-if ($LASTEXITCODE -ne 0) { throw 'Phone-audio build failed.' }
+# csc's /win32icon parser does not handle some non-ASCII paths reliably.
+# Feed it short ASCII temporary copies of the two resource files.
+$resourceRoot = [IO.Path]::GetTempPath()
+$buildIcon = Join-Path $resourceRoot ('AndroidWirelessMirror-' + [guid]::NewGuid().ToString('N') + '.ico')
+$buildManifest = Join-Path $resourceRoot ('AndroidWirelessMirror-' + [guid]::NewGuid().ToString('N') + '.manifest')
+Copy-Item -LiteralPath $icon -Destination $buildIcon -Force
+Copy-Item -LiteralPath $manifestPath -Destination $buildManifest -Force
+try {
+    $common = @('/nologo','/target:winexe','/platform:x64','/langversion:5','/codepage:65001','/optimize+',
+        "/win32icon:$buildIcon","/win32manifest:$buildManifest")
+    & $compiler @common @refs ('/out:' + (Join-Path $out '安卓无线投屏.exe')) @sources
+    if ($LASTEXITCODE -ne 0) { throw 'Build failed.' }
+}
+finally {
+    Remove-Item -LiteralPath $buildIcon -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $buildManifest -Force -ErrorAction SilentlyContinue
+}
+$legacyPhoneAudio = Join-Path $out '安卓无线投屏-手机出声.exe'
+if (Test-Path -LiteralPath $legacyPhoneAudio) { Remove-Item -LiteralPath $legacyPhoneAudio -Force }
 
 foreach ($file in $runtimeFiles) { Copy-Item -LiteralPath $file -Destination $out -Force }
 foreach ($name in @('投屏.ico','使用说明.txt','LICENSE.txt','AntdUI-LICENSE.txt','QRCoder-LICENSE.txt','Lucide-LICENSE.txt')) {

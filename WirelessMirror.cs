@@ -5,6 +5,7 @@ using System.Drawing;
 using System.IO;
 using System.Text;
 using System.Runtime.InteropServices;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Forms;
@@ -81,14 +82,34 @@ internal static class WirelessMirror
         }
     }
 
+    internal static bool IsLocked(string serial)
+    {
+        try
+        {
+            string output = Adb("-s " + serial + " shell dumpsys window policy", null, 4000);
+            if (String.IsNullOrEmpty(output)) return false;
+            if (output.IndexOf("KeyguardServiceDelegate", StringComparison.Ordinal) >= 0 &&
+                Regex.IsMatch(output, @"(?m)^\s*showing=true\s*$")) return true;
+            return Regex.IsMatch(output, @"(?m)^\s*mDreamingLockscreen=true\s*$") ||
+                   Regex.IsMatch(output, @"(?m)^\s*mShowingLockscreen=true\s*$");
+        }
+        catch (Exception error)
+        {
+            AppLog.Warn("读取锁屏状态失败: " + error.Message);
+            return false;
+        }
+    }
+
     internal static Process StartMirror(DeviceRecord device, ConnectionProfile profile, MirrorMenuSignal menuSignal)
     {
-        string options = "--serial=" + device.Serial + " --turn-screen-off --window-height=800 --video-codec=h264 --hwdec=auto --print-fps " +
+        bool locked = IsLocked(device.Serial);
+        // If the phone is locked, keep its screen on so the user can unlock it
+        // on the phone. The secure keyguard itself still cannot be captured.
+        string options = "--serial=" + device.Serial + (locked ? " " : " --turn-screen-off ") +
+            "--window-height=800 --video-codec=h264 --hwdec=auto --print-fps " +
             profile.Options + " --window-title=\"" + Caption(device) + "\"";
-#if PHONE_AUDIO
-        options += " --no-audio";
-#endif
-        AppLog.Info("开始投屏: " + device.Name + " / " + device.Serial + " / " + profile.Options);
+        AppLog.Info("开始投屏: " + device.Name + " / " + device.Serial + " / " +
+            (locked ? "锁屏" : "已解锁") + " / " + profile.Options);
         var start = StartInfo("scrcpy.exe", options);
         start.RedirectStandardError = true;
         start.StandardErrorEncoding = Encoding.UTF8;
@@ -108,6 +129,24 @@ internal static class WirelessMirror
         };
         process.BeginErrorReadLine();
         return process;
+    }
+
+    internal static void Rotate(string serial)
+    {
+        string current = (Adb("-s " + serial + " shell settings get system user_rotation") ?? String.Empty).Trim();
+        int rotation;
+        if (!Int32.TryParse(current, out rotation)) rotation = 0;
+        int next = (rotation % 2 == 0) ? 1 : 0;
+        Adb("-s " + serial + " shell settings put system accelerometer_rotation 0", null, 4000);
+        Adb("-s " + serial + " shell settings put system user_rotation " +
+            next.ToString(System.Globalization.CultureInfo.InvariantCulture), null, 4000);
+        AppLog.Info("手动旋转屏幕: " + serial + " / " + rotation + " -> " + next);
+    }
+
+    internal static void AutoRotate(string serial)
+    {
+        Adb("-s " + serial + " shell settings put system accelerometer_rotation 1", null, 4000);
+        AppLog.Info("恢复手机自动旋转: " + serial);
     }
 
     internal static string Caption(DeviceRecord device)
@@ -140,7 +179,7 @@ internal static class WirelessMirror
 
     private static bool FocusSettings()
     {
-        foreach (string name in new[] { "安卓无线投屏", "安卓无线投屏-手机出声" })
+        foreach (string name in new[] { "安卓无线投屏" })
         foreach (var process in Process.GetProcessesByName(name))
         {
             using (process)

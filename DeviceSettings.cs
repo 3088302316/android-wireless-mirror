@@ -4,6 +4,7 @@ using System.Diagnostics;
 using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.Linq;
+using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Threading.Tasks;
 using System.Windows.Forms;
@@ -28,12 +29,13 @@ internal sealed class DeviceSettings : Form
     private readonly Panel[] pages = new Panel[3];
     private readonly AppButton[] navigation = new AppButton[3];
     private static readonly string[] NavigationNames = { "设备管理", "快捷键", "连接设置" };
-    private readonly AppButton connect, rename, history, refresh, pairQr, pairCode;
+    private readonly AppButton connect, rename, history, lowLatency, refresh, pairQr, pairCode;
     private readonly Label profileStatus = new Label();
     private readonly AppButton applyProfile, probeButton, networkButton, logButton;
     private readonly ConnectionProfile draft;
     private AntdUI.Slider sizeSlider, fpsSlider, bitrateSlider, videoBufferSlider, audioBufferSlider;
     private Label sizeReading, fpsReading, bitrateReading, videoBufferReading, audioBufferReading;
+    private AppButton audioButton, settingsAudioButton;
     private readonly Timer statusTimer = new Timer { Interval = 8000 };
     private readonly ToolTip tooltips = new ToolTip();
     private readonly Font deviceNameFont = new Font("Microsoft YaHei UI", 10.5f, FontStyle.Bold);
@@ -58,6 +60,11 @@ internal sealed class DeviceSettings : Form
         this.directory = directory;
         this.active = active;
         this.rows = rows ?? new List<DeviceRecord>();
+        if (this.rows.Count == 0 && active == null)
+        {
+            try { this.rows = directory.Cached(); }
+            catch (Exception error) { AppLog.Warn("读取设备历史失败: " + error.Message); }
+        }
         draft = profile == null ? ConnectionProfile.Load() : profile.Copy();
         phoneIcon = AntdUI.SvgExtend.SvgToBmp(MirrorIcons.Smartphone, 22, 22, null);
         var loadedIcon = WirelessMirror.LoadIcon();
@@ -74,6 +81,7 @@ internal sealed class DeviceSettings : Form
         ClientSize = new Size(1040, 700);
         MinimumSize = new Size(900, 610);
         DoubleBuffered = true;
+        DoubleBuffer(content);
         TopMost = active != null;
         WindowTheme.Attach(this);
 
@@ -89,12 +97,15 @@ internal sealed class DeviceSettings : Form
         connect.Font = new Font("Microsoft YaHei UI", 10.5f, FontStyle.Bold);
         rename = ActionButton("重命名", Rename, false, "EditOutlined");
         history = ActionButton("连接记录", ShowHistory, false, MirrorIcons.History);
+        lowLatency = ActionButton("低延迟", EnableLowLatency, false, MirrorIcons.Play);
+        lowLatency.Size = new Size(96, 46);
         refresh = ActionButton("刷新设备", delegate { RefreshFromButton(); }, false, MirrorIcons.Refresh);
         refresh.Size = new Size(112, 40);
         pairQr = ActionButton("扫码配对", PairWithQr, false, MirrorIcons.QrCode);
         pairCode = ActionButton("六位码配对", PairWithCode, false, MirrorIcons.Keyboard);
         tooltips.SetToolTip(refresh, "刷新设备列表（F5）");
         tooltips.SetToolTip(connect, "打开选中设备。按住 Ctrl 可选择多台。");
+        tooltips.SetToolTip(lowLatency, "套用 0ms 视频缓冲和 90fps；鼠标保持普通桌面指针，不会被窗口捕获");
         tooltips.SetToolTip(pairQr, "用手机扫描二维码完成无线调试配对");
         tooltips.SetToolTip(pairCode, "输入手机配对弹窗里的地址和六位码");
 
@@ -347,11 +358,24 @@ internal sealed class DeviceSettings : Form
             navigation[i].BorderWidth = i == page ? 1 : 0;
             navigation[i].Invalidate();
         }
-        content.ResumeLayout();
+        content.ResumeLayout(true);
+        content.PerformLayout();
+    }
+
+    private static void DoubleBuffer(Control control)
+    {
+        if (control == null) return;
+        try
+        {
+            var property = typeof(Control).GetProperty("DoubleBuffered", BindingFlags.Instance | BindingFlags.NonPublic);
+            if (property != null) property.SetValue(control, true, null);
+        }
+        catch (Exception) { }
     }
 
     private Panel DevicePage()
     {
+        DoubleBuffer(devices);
         devices.Dock = DockStyle.Fill;
         devices.SelectionMode = active == null ? SelectionMode.MultiExtended : SelectionMode.One;
         devices.DrawMode = DrawMode.OwnerDrawFixed;
@@ -423,6 +447,8 @@ internal sealed class DeviceSettings : Form
         primary.Controls.Add(connect);
         primary.Controls.Add(rename);
         primary.Controls.Add(history);
+        primary.Controls.Add(lowLatency);
+        if (active == null) primary.Controls.Add(AudioSelector(false));
         footer.Controls.Add(primary, 0, 1);
 
         var add = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Fill, WrapContents = true, Margin = new Padding(0, 4, 0, 0) };
@@ -617,14 +643,14 @@ internal sealed class DeviceSettings : Form
     private Panel KeyPage()
     {
         var host = new Panel { Dock = DockStyle.Fill, BackColor = WindowTheme.Surface, Padding = new Padding(18, 12, 10, 10), AutoScroll = true };
-        var list = new TableLayoutPanel { Dock = DockStyle.Top, AutoSize = true, ColumnCount = 2, RowCount = 10, BackColor = WindowTheme.Surface, Margin = new Padding(0) };
+        var list = new TableLayoutPanel { Dock = DockStyle.Top, AutoSize = true, ColumnCount = 2, RowCount = 11, BackColor = WindowTheme.Surface, Margin = new Padding(0) };
         list.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 190));
         list.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         string[,] keys = {
             {"F2 / 鼠标中键", "回手机主页"}, {"F3", "最近任务"}, {"F4 / F5", "展开 / 收起通知栏"},
             {"F6", "切换全屏"}, {"F7 / 鼠标右键", "返回"}, {"F8 / F9", "熄灭 / 点亮手机屏幕"},
-            {"F10", "打开设备管理"}, {"左 Alt + ↑ / ↓", "调节手机音量"}, {"Ctrl + 左键拖动", "双指缩放"},
-            {"滚轮", "回到主页"}
+            {"F10", "打开设备管理"}, {"F11 / 托盘菜单", "旋转手机屏幕"}, {"左 Alt + ↑ / ↓", "调节手机音量"},
+            {"Ctrl + 左键拖动", "双指缩放"}, {"滚轮", "回到主页"}
         };
         for (int i = 0; i < keys.GetLength(0); i++)
         {
@@ -658,11 +684,14 @@ internal sealed class DeviceSettings : Form
         recovery.Controls.Add(toggle, 1, 2);
         cards.Controls.Add(recovery, 1, 2);
 
-        var host = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 2, Margin = new Padding(0) };
+        var host = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 3, Margin = new Padding(0) };
         host.RowStyles.Add(new RowStyle(SizeType.Absolute, 50));
+        host.RowStyles.Add(new RowStyle(SizeType.Absolute, 48));
         host.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         host.Controls.Add(PresetBar(), 0, 0);
-        host.Controls.Add(cards, 0, 1);
+        host.Controls.Add(OptionsBar(), 0, 1);
+        host.Controls.Add(cards, 0, 2);
+        UpdateAudioUi();
 
         var footer = new TableLayoutPanel { AutoSize = true, ColumnCount = 1, RowCount = 2, Padding = new Padding(0, 6, 0, 0), Margin = new Padding(0) };
         profileStatus.AutoSize = false;
@@ -680,6 +709,109 @@ internal sealed class DeviceSettings : Form
         actions.Controls.Add(logButton);
         footer.Controls.Add(actions, 0, 1);
         return Page("连接设置", "按场景选预设，或独立调整画质和缓冲。", host, footer, null);
+    }
+
+    private AppButton AudioSelector(bool settings)
+    {
+        AppButton button = null;
+        string label = "声音：" + ConnectionProfile.AudioLabel(draft.Audio);
+        button = StyledButton(label, null, delegate { ShowAudioMenu(button, settings); }, false);
+        button.Size = new Size(settings ? 132 : 128, settings ? 36 : 46);
+        button.Margin = new Padding(settings ? 0 : 10, 0, 0, 0);
+        button.AccessibleName = "声音输出：" + ConnectionProfile.AudioLabel(draft.Audio);
+        tooltips.SetToolTip(button, "选择电脑、手机、电脑+手机或全部静音；切换声音会重连投屏。");
+        if (settings) settingsAudioButton = button;
+        else audioButton = button;
+        return button;
+    }
+
+    private void ShowAudioMenu(AppButton button, bool settings)
+    {
+        var menu = new ContextMenuStrip();
+        var options = new[] { AudioRoute.Pc, AudioRoute.Phone, AudioRoute.Both, AudioRoute.None };
+        foreach (var option in options)
+        {
+            var route = option;
+            var item = new ToolStripMenuItem(AudioMenuLabel(route));
+            item.Checked = draft.Audio == route;
+            item.Click += delegate
+            {
+                if (draft.Audio == route) return;
+                draft.Audio = route;
+                UpdateAudioUi();
+                if (settings)
+                {
+                    profileStatus.ForeColor = WindowTheme.AccentLight;
+                    profileStatus.Text = "声音输出已改为「" + AudioMenuLabel(route) + "」。点「保存并重连」生效。";
+                    return;
+                }
+                try
+                {
+                    draft.Save();
+                    SetNotice("声音输出已改为「" + AudioMenuLabel(route) + "」，下次投屏生效。", WindowTheme.Green);
+                }
+                catch (Exception error)
+                {
+                    SetNotice("声音设置保存失败：" + error.Message, WindowTheme.Red);
+                }
+            };
+            menu.Items.Add(item);
+        }
+        menu.Closed += delegate { menu.Dispose(); };
+        menu.Show(button, new Point(0, button.Height));
+    }
+
+    private static string AudioMenuLabel(AudioRoute route)
+    {
+        switch (route)
+        {
+            case AudioRoute.Phone: return "手机";
+            case AudioRoute.Both: return "电脑 + 手机";
+            case AudioRoute.None: return "都不输出";
+            default: return "电脑";
+        }
+    }
+
+    private Control OptionsBar()
+    {
+        var bar = new FlowLayoutPanel { Dock = DockStyle.Fill, WrapContents = true, Margin = new Padding(0, 0, 0, 4) };
+        var audioLabel = TextLabel("声音输出", 9f, WindowTheme.Faint, true);
+        audioLabel.Margin = new Padding(1, 10, 8, 0);
+        bar.Controls.Add(audioLabel);
+        settingsAudioButton = AudioSelector(true);
+        bar.Controls.Add(settingsAudioButton);
+        return bar;
+    }
+
+    private void UpdateAudioUi()
+    {
+        if (audioButton != null)
+        {
+            audioButton.Text = "声音：" + ConnectionProfile.AudioLabel(draft.Audio);
+            audioButton.AccessibleName = "声音输出：" + ConnectionProfile.AudioLabel(draft.Audio);
+        }
+        if (settingsAudioButton != null)
+        {
+            settingsAudioButton.Text = "声音：" + ConnectionProfile.AudioLabel(draft.Audio);
+            settingsAudioButton.AccessibleName = "声音输出：" + ConnectionProfile.AudioLabel(draft.Audio);
+        }
+        bool pcAudio = draft.Audio == AudioRoute.Pc || draft.Audio == AudioRoute.Both;
+        if (audioBufferSlider != null)
+        {
+            audioBufferSlider.Enabled = pcAudio;
+            if (audioBufferReading != null) audioBufferReading.Enabled = pcAudio;
+        }
+    }
+
+    private void EnableLowLatency()
+    {
+        ApplyPreset(StreamPresets.All[1]);
+        if (active == null)
+        {
+            draft.Save();
+            SetNotice("已启用游戏低延迟：0ms 视频缓冲、90fps。鼠标保持普通桌面指针，不会被窗口捕获。", WindowTheme.Green);
+        }
+        else SaveProfile();
     }
 
     private Control PresetBar()
@@ -713,6 +845,7 @@ internal sealed class DeviceSettings : Form
         bitrateReading.Text = (draft.Bitrate / 10m).ToString("0.0") + " Mbps";
         videoBufferReading.Text = draft.VideoBuffer + " ms";
         audioBufferReading.Text = draft.AudioBuffer + " ms";
+        UpdateAudioUi();
         profileStatus.ForeColor = WindowTheme.AccentLight;
         profileStatus.Text = "已套用「" + preset.Name + "」预设，点「" +
             (active == null ? "保存设置" : "保存并重连") + "」生效。";

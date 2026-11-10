@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
+using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Forms;
 
@@ -10,6 +11,9 @@ internal sealed class MirrorKeys : IDisposable
     private delegate IntPtr KeyboardHook(int code, IntPtr message, IntPtr data);
     private readonly KeyboardHook callback;
     private readonly Process mirror;
+    private readonly string serial;
+    private readonly AudioRoute audio;
+    private readonly Action<AudioRoute> changeAudio;
     private IntPtr hook;
     private int settingsPage;
     private readonly HashSet<int> heldKeys = new HashSet<int>();
@@ -29,9 +33,12 @@ internal sealed class MirrorKeys : IDisposable
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode)]
     private static extern IntPtr GetModuleHandle(string name);
 
-    public MirrorKeys(Process mirror)
+    public MirrorKeys(Process mirror, string serial, AudioRoute audio, Action<AudioRoute> changeAudio)
     {
         this.mirror = mirror;
+        this.serial = serial;
+        this.audio = audio;
+        this.changeAudio = changeAudio;
         callback = HandleKey;
         hook = SetWindowsHookEx(13, callback, GetModuleHandle(null), 0);
     }
@@ -68,6 +75,10 @@ internal sealed class MirrorKeys : IDisposable
                             tray.ShowBalloonTip(4000, "安卓无线投屏",
                                 "本次连接记录未能保存：" + historyError.Message, ToolTipIcon.Warning);
                         }
+                        if (WirelessMirror.IsLocked(serial))
+                            tray.ShowBalloonTip(6000, "手机已锁屏",
+                                "锁屏密码界面受 Android 保护，不能投屏。请在手机上解锁，画面会自动恢复。",
+                                ToolTipIcon.Warning);
                     }
                     if (page != 0) showSettings(page - 1);
                 }
@@ -89,6 +100,22 @@ internal sealed class MirrorKeys : IDisposable
         menu.Items.Add("快捷键", null, delegate { settingsPage = 2; });
         menu.Items.Add("连接设置", null, delegate { settingsPage = 3; });
         menu.Items.Add(new ToolStripSeparator());
+        var rotate = new ToolStripMenuItem("旋转屏幕");
+        rotate.ShortcutKeyDisplayString = "F11";
+        rotate.Click += delegate { Task.Run(delegate { Rotate(); }); };
+        menu.Items.Add(rotate);
+        menu.Items.Add("恢复自动旋转", null, delegate { Task.Run(delegate { AutoRotate(); }); });
+        var audioMenu = new ToolStripMenuItem("声音输出");
+        foreach (var option in new[] { AudioRoute.Pc, AudioRoute.Phone, AudioRoute.Both, AudioRoute.None })
+        {
+            var route = option;
+            var item = new ToolStripMenuItem(ConnectionProfile.AudioLabel(route));
+            item.Checked = audio == route;
+            item.Click += delegate { if (changeAudio != null) changeAudio(route); };
+            audioMenu.DropDownItems.Add(item);
+        }
+        menu.Items.Add(audioMenu);
+        menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add("关闭投屏", null, delegate { if (!mirror.HasExited) mirror.CloseMainWindow(); });
         return menu;
     }
@@ -99,7 +126,7 @@ internal sealed class MirrorKeys : IDisposable
         int key = Marshal.ReadInt32(data);
         bool up = message.ToInt64() == 0x101 || message.ToInt64() == 0x105;
         if (up && heldKeys.Remove(key)) return new IntPtr(1);
-        if (key < (int)Keys.F2 || key > (int)Keys.F10 || up)
+        if (key < (int)Keys.F2 || key > (int)Keys.F11 || up)
             return CallNextHookEx(hook, code, message, data);
 
         uint foregroundProcess;
@@ -119,8 +146,21 @@ internal sealed class MirrorKeys : IDisposable
             case Keys.F8: SendShortcut((byte)'O', false); break;
             case Keys.F9: SendShortcut((byte)'O', true); break;
             case Keys.F10: settingsPage = 1; break;
+            case Keys.F11: Task.Run(delegate { Rotate(); }); break;
         }
         return new IntPtr(1);
+    }
+
+    private void Rotate()
+    {
+        try { WirelessMirror.Rotate(serial); }
+        catch (Exception error) { AppLog.Warn("手动旋转屏幕失败: " + error.Message); }
+    }
+
+    private void AutoRotate()
+    {
+        try { WirelessMirror.AutoRotate(serial); }
+        catch (Exception error) { AppLog.Warn("恢复自动旋转失败: " + error.Message); }
     }
 
     private static void SendShortcut(byte key, bool shift)

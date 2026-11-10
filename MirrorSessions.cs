@@ -136,7 +136,20 @@ internal sealed class MirrorSessions : IDisposable
             using (var signal = new MirrorMenuSignal())
             using (var mirror = WirelessMirror.StartMirror(device, session.Profile, signal))
             using (var telemetry = new MirrorTelemetry(mirror, serial))
-            using (var keys = new MirrorKeys(mirror))
+            using (var keys = new MirrorKeys(mirror, serial, session.Profile.Audio, delegate(AudioRoute route)
+            {
+                if (session.Profile.Audio == route) return;
+                var updated = session.Profile.Copy();
+                updated.Audio = route;
+                try { updated.Save(); }
+                catch (Exception error)
+                {
+                    AppLog.Warn("保存声音输出设置失败: " + error.Message);
+                    return;
+                }
+                replacement = updated;
+                Stop(mirror);
+            }))
             {
                 session.Process = mirror;
                 try

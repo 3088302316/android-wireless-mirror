@@ -11,7 +11,7 @@
 [Setup]
 AppId={#PackageId}
 AppName=安卓无线投屏
-AppVersion=1.1.0
+AppVersion=1.1.1
 DefaultDirName={localappdata}\Programs\AndroidWirelessMirror
 DefaultGroupName=安卓无线投屏
 DisableDirPage=no
@@ -35,12 +35,16 @@ Name: "setup"; MessagesFile: "{#LanguageFile}"
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"
 
+[InstallDelete]
+Type: files; Name: "{app}\安卓无线投屏-手机出声.exe"
+Type: files; Name: "{group}\安卓无线投屏（手机出声）"
+Type: files; Name: "{userdesktop}\安卓无线投屏（手机出声）"
+
 [Files]
 Source: "{#PayloadDir}\*"; DestDir: "{app}"; Flags: recursesubdirs createallsubdirs ignoreversion
 
 [Icons]
 Name: "{group}\安卓无线投屏"; Filename: "{app}\安卓无线投屏.exe"; WorkingDir: "{app}"
-Name: "{group}\安卓无线投屏（手机出声）"; Filename: "{app}\安卓无线投屏-手机出声.exe"; WorkingDir: "{app}"
 Name: "{userdesktop}\安卓无线投屏"; Filename: "{app}\安卓无线投屏.exe"; WorkingDir: "{app}"; Tasks: desktopicon
 
 [Run]

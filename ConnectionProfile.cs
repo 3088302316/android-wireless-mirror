@@ -4,6 +4,14 @@ using System.IO;
 using System.Runtime.Serialization;
 using System.Runtime.Serialization.Json;
 
+internal enum AudioRoute
+{
+    Pc = 0,
+    Phone = 1,
+    Both = 2,
+    None = 3
+}
+
 [DataContract]
 internal sealed class ConnectionProfile
 {
@@ -13,6 +21,8 @@ internal sealed class ConnectionProfile
     [DataMember] public int VideoBuffer = 0;
     [DataMember] public int AudioBuffer = 50;
     [DataMember] public bool AutoReconnect = true;
+    [DataMember] public AudioRoute Audio = AudioRoute.Pc;
+    [DataMember(EmitDefaultValue = false)] public bool PhoneAudio;
 
     private static readonly DataContractJsonSerializer Serializer = new DataContractJsonSerializer(typeof(ConnectionProfile));
 
@@ -20,9 +30,28 @@ internal sealed class ConnectionProfile
     {
         get
         {
-            return String.Format(CultureInfo.InvariantCulture,
+            string options = String.Format(CultureInfo.InvariantCulture,
                 "--max-size={0} --max-fps={1} --video-bit-rate={2} --video-buffer={3} --audio-buffer={4}",
                 Size, Fps, Bitrate * 100000, VideoBuffer, AudioBuffer);
+            switch (Audio)
+            {
+                case AudioRoute.Phone:
+                    options += " --no-audio";
+                    break;
+                case AudioRoute.Both:
+                    options += " --audio-source=playback --audio-dup";
+                    break;
+                case AudioRoute.None:
+                    options += " --audio-source=playback --no-audio-playback";
+                    break;
+                default:
+                    options += " --audio-source=playback";
+                    break;
+            }
+            // Always use absolute SDK mouse input: the cursor remains a normal
+            // desktop cursor and can leave the mirror window.
+            options += " --mouse=sdk";
+            return options;
         }
     }
 
@@ -38,6 +67,8 @@ internal sealed class ConnectionProfile
                 {
                     var saved = (ConnectionProfile)Serializer.ReadObject(stream);
                     saved.Validate();
+                    if (saved.PhoneAudio) saved.Audio = AudioRoute.Phone;
+                    saved.PhoneAudio = false;
                     return saved;
                 }
             }
@@ -95,10 +126,22 @@ internal sealed class ConnectionProfile
         }
     }
 
+    internal static string AudioLabel(AudioRoute route)
+    {
+        switch (route)
+        {
+            case AudioRoute.Phone: return "手机";
+            case AudioRoute.Both: return "两者";
+            case AudioRoute.None: return "静音";
+            default: return "电脑";
+        }
+    }
+
     private void Validate()
     {
         if (Size < 480 || Size > 3840 || Fps < 15 || Fps > 120 || Bitrate < 5 || Bitrate > 300 ||
             VideoBuffer < 0 || VideoBuffer > 250 || AudioBuffer < 20 || AudioBuffer > 250)
             throw new InvalidDataException("连接设置有超出范围的数值。请检查 connection-settings.json。");
+        if (Audio < AudioRoute.Pc || Audio > AudioRoute.None) Audio = AudioRoute.Pc;
     }
 }

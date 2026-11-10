@@ -48,20 +48,30 @@ internal sealed class DeviceDirectory
         }
     }
 
+    public List<DeviceRecord> Cached()
+    {
+        lock (gate) return CopySavedLocked();
+    }
+
+    private List<DeviceRecord> CopySavedLocked()
+    {
+        return saved.Select(record => new DeviceRecord
+        {
+            Id = record.Id,
+            Alias = record.Alias,
+            Model = record.Model,
+            LastUsed = record.LastUsed,
+            Connections = record.Connections,
+            RecentConnections = record.RecentConnections == null ? null : new List<DateTime>(record.RecentConnections)
+        }).ToList();
+    }
+
     public List<DeviceRecord> Scan()
     {
         List<DeviceRecord> rows;
         lock (gate)
         {
-            rows = saved.Select(record => new DeviceRecord
-            {
-                Id = record.Id,
-                Alias = record.Alias,
-                Model = record.Model,
-                LastUsed = record.LastUsed,
-                Connections = record.Connections,
-                RecentConnections = record.RecentConnections == null ? null : new List<DateTime>(record.RecentConnections)
-            }).ToList();
+            rows = CopySavedLocked();
         }
 
         var online = new List<string>();
