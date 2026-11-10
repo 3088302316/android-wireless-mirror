@@ -135,7 +135,6 @@ internal sealed class MirrorSessions : IDisposable
             var elapsed = Stopwatch.StartNew();
             using (var signal = new MirrorMenuSignal())
             using (var mirror = WirelessMirror.StartMirror(device, session.Profile, signal))
-            using (var telemetry = new MirrorTelemetry(mirror, serial))
             using (var keys = new MirrorKeys(mirror, serial, session.Profile.Audio, delegate(AudioRoute route)
             {
                 if (session.Profile.Audio == route) return;
@@ -157,7 +156,6 @@ internal sealed class MirrorSessions : IDisposable
                     await keys.RunAsync(device.Name, delegate(IntPtr window)
                     {
                         session.HasWindow = true;
-                        telemetry.Start();
                         PositionWindow(window);
                         directory.RememberConnection(device);
                         center.RefreshStreamStatus(device);

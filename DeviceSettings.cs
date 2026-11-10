@@ -36,6 +36,7 @@ internal sealed class DeviceSettings : Form
     private AntdUI.Slider sizeSlider, fpsSlider, bitrateSlider, videoBufferSlider, audioBufferSlider;
     private Label sizeReading, fpsReading, bitrateReading, videoBufferReading, audioBufferReading;
     private AppButton audioButton, settingsAudioButton;
+    private ContextMenuStrip audioMenu;
     private readonly Timer statusTimer = new Timer { Interval = 8000 };
     private readonly ToolTip tooltips = new ToolTip();
     private readonly Font deviceNameFont = new Font("Microsoft YaHei UI", 10.5f, FontStyle.Bold);
@@ -727,7 +728,15 @@ internal sealed class DeviceSettings : Form
 
     private void ShowAudioMenu(AppButton button, bool settings)
     {
+        if (audioMenu != null && !audioMenu.Visible)
+        {
+            var previous = audioMenu;
+            audioMenu = null;
+            previous.Dispose();
+        }
         var menu = new ContextMenuStrip();
+        audioMenu = menu;
+        menu.Closed += delegate { if (ReferenceEquals(audioMenu, menu)) audioMenu = null; };
         var options = new[] { AudioRoute.Pc, AudioRoute.Phone, AudioRoute.Both, AudioRoute.None };
         foreach (var option in options)
         {
@@ -757,7 +766,8 @@ internal sealed class DeviceSettings : Form
             };
             menu.Items.Add(item);
         }
-        menu.Closed += delegate { menu.Dispose(); };
+        // Do not dispose from Menu.Closed: the drop-down is still processing
+        // its native window messages there, which caused ObjectDisposedException.
         menu.Show(button, new Point(0, button.Height));
     }
 

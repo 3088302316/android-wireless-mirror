@@ -106,7 +106,7 @@ internal static class WirelessMirror
         // If the phone is locked, keep its screen on so the user can unlock it
         // on the phone. The secure keyguard itself still cannot be captured.
         string options = "--serial=" + device.Serial + (locked ? " " : " --turn-screen-off ") +
-            "--window-height=800 --video-codec=h264 --hwdec=auto --print-fps " +
+            "--window-height=800 --video-codec=h264 --hwdec=auto " +
             profile.Options + " --window-title=\"" + Caption(device) + "\"";
         AppLog.Info("开始投屏: " + device.Name + " / " + device.Serial + " / " +
             (locked ? "锁屏" : "已解锁") + " / " + profile.Options);
