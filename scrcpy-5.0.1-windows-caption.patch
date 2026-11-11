@@ -439,7 +439,7 @@ index 0000000..487f074
 +    struct mirror_caption_state *state = calloc(1, sizeof(*state));
 +    if (!state) return;
 +    state->receiver = receiver;
-+    state->show_stats = TRUE;
++    state->show_stats = FALSE;
 +    state->rtt = -1;
 +    if (SetWindowSubclass(hwnd, caption_proc, MIRROR_MENU_SUBCLASS, (DWORD_PTR) state)) {
 +        InterlockedExchangePointer(&stats_window, hwnd);
