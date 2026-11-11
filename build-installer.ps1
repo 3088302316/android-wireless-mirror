@@ -12,8 +12,8 @@ $tempRoot = (Resolve-Path -LiteralPath ([IO.Path]::GetTempPath())).Path
 $staging = Join-Path $tempRoot ('AndroidWirelessMirrorBuild-' + [guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $staging | Out-Null
 try {
-    $payload = & (Join-Path $PSScriptRoot 'build.ps1') -RuntimeDirectory $RuntimeDirectory `
-        -OutputDirectory (Join-Path $staging '安卓无线投屏便携版')
+    $payload = & (Join-Path $PSScriptRoot 'build.ps1') -RuntimeDirectory $RuntimeDirectory -OutputDirectory (Join-Path $staging '安卓无线投屏便携版')
+    $payload = @($payload) | Select-Object -Last 1
     Add-Type -AssemblyName System.IO.Compression.FileSystem
     $archiveName = '安卓无线投屏便携版-Windows-x64.zip'
     $archive = Join-Path $staging $archiveName

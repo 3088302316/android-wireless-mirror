@@ -36,6 +36,10 @@ internal static class WindowTheme
         // Windows 11 uses attribute 20; Windows 10 1809+ uses 19.
         if (DwmSetWindowAttribute(handle, 20, ref enabled, sizeof(int)) != 0)
             DwmSetWindowAttribute(handle, 19, ref enabled, sizeof(int));
+
+        // Keep the Windows 11 resize frame dark instead of its default white edge.
+        int border = ColorTranslator.ToWin32(Canvas);
+        DwmSetWindowAttribute(handle, 34, ref border, sizeof(int));
     }
 
     public static Font Mono(float size, FontStyle style = FontStyle.Regular)

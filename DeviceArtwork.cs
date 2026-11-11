@@ -20,6 +20,8 @@ internal sealed class DeviceArtwork : Control
     {
         DoubleBuffered = true;
         ResizeRedraw = true;
+        SetStyle(ControlStyles.SupportsTransparentBackColor, true);
+        BackColor = Color.Transparent;
         Size = new Size(200, 124);
         Anchor = AnchorStyles.Left | AnchorStyles.Right;
         Margin = new Padding(0, 5, 0, 13);

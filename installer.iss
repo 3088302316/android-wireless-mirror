@@ -11,7 +11,7 @@
 [Setup]
 AppId={#PackageId}
 AppName=安卓无线投屏
-AppVersion=1.1.5
+AppVersion=1.1.6
 DefaultDirName={localappdata}\Programs\AndroidWirelessMirror
 DefaultGroupName=安卓无线投屏
 DisableDirPage=no

@@ -27,22 +27,27 @@ $refs += @('AntdUI.dll','QRCoder.dll') | ForEach-Object { '/r:' + (Join-Path $ru
 $sources = Get-ChildItem -LiteralPath $PSScriptRoot -Filter '*.cs' -File | ForEach-Object FullName
 $icon = Join-Path $PSScriptRoot '投屏.ico'
 $manifestPath = Join-Path $PSScriptRoot 'app.manifest'
+$wallpaperPath = Join-Path $PSScriptRoot 'wallpaper.png'
+if (!(Test-Path -LiteralPath $wallpaperPath -PathType Leaf)) { throw 'Missing wallpaper.png.' }
 # csc's /win32icon parser does not handle some non-ASCII paths reliably.
-# Feed it short ASCII temporary copies of the two resource files.
+# Feed it short ASCII temporary copies of the resource files.
 $resourceRoot = [IO.Path]::GetTempPath()
 $buildIcon = Join-Path $resourceRoot ('AndroidWirelessMirror-' + [guid]::NewGuid().ToString('N') + '.ico')
 $buildManifest = Join-Path $resourceRoot ('AndroidWirelessMirror-' + [guid]::NewGuid().ToString('N') + '.manifest')
+$buildWallpaper = Join-Path $resourceRoot ('AndroidWirelessMirror-' + [guid]::NewGuid().ToString('N') + '.png')
 Copy-Item -LiteralPath $icon -Destination $buildIcon -Force
 Copy-Item -LiteralPath $manifestPath -Destination $buildManifest -Force
+Copy-Item -LiteralPath $wallpaperPath -Destination $buildWallpaper -Force
 try {
     $common = @('/nologo','/target:winexe','/platform:x64','/langversion:5','/codepage:65001','/optimize+',
-        "/win32icon:$buildIcon","/win32manifest:$buildManifest")
+        "/win32icon:$buildIcon","/win32manifest:$buildManifest","/resource:$buildWallpaper,Wallpaper.png")
     & $compiler @common @refs ('/out:' + (Join-Path $out '安卓无线投屏.exe')) @sources
     if ($LASTEXITCODE -ne 0) { throw 'Build failed.' }
 }
 finally {
     Remove-Item -LiteralPath $buildIcon -Force -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath $buildManifest -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $buildWallpaper -Force -ErrorAction SilentlyContinue
 }
 $legacyPhoneAudio = Join-Path $out '安卓无线投屏-手机出声.exe'
 if (Test-Path -LiteralPath $legacyPhoneAudio) { Remove-Item -LiteralPath $legacyPhoneAudio -Force }

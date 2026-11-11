@@ -10,12 +10,18 @@ using System.Threading.Tasks;
 using System.Windows.Forms;
 using AppButton = AccessibleButton;
 
-internal sealed class DeviceSettings : Form
+internal sealed class DeviceSettings : Form, IMessageFilter
 {
     private readonly DeviceDirectory directory;
     private readonly DeviceRecord active;
     private List<DeviceRecord> rows;
     private readonly ListBox devices = new ListBox();
+    private readonly ClickablePanel rowHost = new ClickablePanel
+    {
+        Dock = DockStyle.Fill,
+        AutoScroll = true
+    };
+    private readonly HashSet<int> selectedRows = new HashSet<int>();
     private readonly DeviceArtwork artwork = new DeviceArtwork();
     private readonly Label deviceStatus = new Label();
     private readonly Label listCount = new Label();
@@ -26,10 +32,13 @@ internal sealed class DeviceSettings : Form
     private readonly Label detailTip = new Label();
     private readonly AntdUI.Tag chosenState = new AntdUI.Tag();
     private readonly Panel content = new Panel { Dock = DockStyle.Fill };
+    private int currentPage = -1;
+    private TableLayoutPanel frame;
+    private Bitmap resizeSnapshot;
     private readonly Panel[] pages = new Panel[3];
     private readonly AppButton[] navigation = new AppButton[3];
     private static readonly string[] NavigationNames = { "设备管理", "快捷键", "连接设置" };
-    private readonly AppButton connect, rename, history, lowLatency, refresh, pairQr, pairCode;
+    private readonly AppButton connect, rename, history, lowLatency, refresh, delete, pairQr, pairCode;
     private readonly Label profileStatus = new Label();
     private readonly AppButton applyProfile, probeButton, networkButton, logButton;
     private readonly ConnectionProfile draft;
@@ -45,6 +54,7 @@ internal sealed class DeviceSettings : Form
     private readonly Font tinyFont = new Font("Microsoft YaHei UI", 8.5f);
     private readonly Bitmap phoneIcon;
     private readonly Bitmap appIcon;
+    private Image wallpaper;
     private string summary = "";
     private int hoverIndex = -1;
     private bool scanning;
@@ -73,6 +83,7 @@ internal sealed class DeviceSettings : Form
         var loadedIcon = WirelessMirror.LoadIcon();
         appIcon = loadedIcon.ToBitmap();
         if (!ReferenceEquals(loadedIcon, SystemIcons.Application)) loadedIcon.Dispose();
+        LoadFixedWallpaper();
 
         Text = active == null ? "安卓无线投屏 · 设备中心" : active.Name + " · 投屏设置";
         Icon = WirelessMirror.LoadIcon();
@@ -88,7 +99,7 @@ internal sealed class DeviceSettings : Form
         TopMost = active != null;
         WindowTheme.Attach(this);
 
-        var frame = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 1, Margin = new Padding(0) };
+        frame = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 1, Margin = new Padding(0) };
         frame.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 206));
         frame.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         Controls.Add(frame);
@@ -104,6 +115,9 @@ internal sealed class DeviceSettings : Form
         lowLatency.Size = new Size(96, 46);
         refresh = ActionButton("刷新设备", delegate { RefreshFromButton(); }, false, MirrorIcons.Refresh);
         refresh.Size = new Size(112, 40);
+        delete = ActionButton("删除设备", DeleteSelected, false, "DeleteOutlined");
+        delete.Size = new Size(112, 40);
+        tooltips.SetToolTip(delete, "从设备历史中删除选中的设备；在线设备仍可能被重新扫描到");
         pairQr = ActionButton("扫码配对", PairWithQr, false, MirrorIcons.QrCode);
         pairCode = ActionButton("六位码配对", PairWithCode, false, MirrorIcons.Keyboard);
         tooltips.SetToolTip(refresh, "刷新设备列表（F5）");
@@ -126,6 +140,10 @@ internal sealed class DeviceSettings : Form
         pages[2] = QualityPage();
         Fill(rows);
         ShowPage(Math.Max(0, Math.Min(page, pages.Length - 1)));
+        DoubleBufferTree(this);
+
+        ResizeBegin += delegate { BeginResizeSnapshot(); };
+        ResizeEnd += delegate { EndResizeSnapshot(); };
 
         statusTimer.Tick += delegate
         {
@@ -137,6 +155,7 @@ internal sealed class DeviceSettings : Form
             BeginInvoke((MethodInvoker)delegate
             {
                 if (IsDisposed) return;
+                WindowTheme.Attach(this);
                 Activate();
                 BringToFront();
                 SetForegroundWindow(Handle);
@@ -195,13 +214,10 @@ internal sealed class DeviceSettings : Form
         }
         side.Controls.Add(nav, 0, 1);
 
-        var tip = new AntdUI.Panel
+        var tip = new Panel
         {
             Dock = DockStyle.Fill,
-            Radius = 11,
-            Back = WindowTheme.Surface,
-            BorderWidth = 1,
-            BorderColor = WindowTheme.Line,
+            BackColor = WindowTheme.Rail,
             Margin = new Padding(0, 10, 0, 10)
         };
         var tipText = new Label
@@ -252,14 +268,14 @@ internal sealed class DeviceSettings : Form
             Radius = 10,
             Size = new Size(Math.Max(94, 48 + title.Length * 14), 42),
             Type = primary ? AntdUI.TTypeMini.Primary : AntdUI.TTypeMini.Default,
-            DefaultBack = WindowTheme.Surface,
-            DefaultBorderColor = Color.FromArgb(61, 72, 101),
-            BorderWidth = 1,
-            BackColor = primary ? WindowTheme.Accent : WindowTheme.Surface,
-            ForeColor = WindowTheme.Ink,
+            DefaultBack = Color.Transparent,
+            DefaultBorderColor = Color.Transparent,
+            BorderWidth = 0,
+            BackColor = Color.Transparent,
+            ForeColor = primary ? WindowTheme.AccentLight : WindowTheme.Muted,
             ForeHover = WindowTheme.Ink,
             ForeActive = WindowTheme.Ink,
-            BackHover = WindowTheme.Selected,
+            BackHover = Color.FromArgb(34, 255, 255, 255),
             Margin = new Padding(0, 0, 8, 4)
         };
         if (icon != null && icon.StartsWith("<svg", StringComparison.Ordinal))
@@ -269,8 +285,39 @@ internal sealed class DeviceSettings : Form
             if (bitmap != null) button.Disposed += delegate { bitmap.Dispose(); };
         }
         else button.IconSvg = icon;
+        button.Tag = primary;
         if (action != null) button.Click += delegate { action(); };
         return button;
+    }
+
+    private static void DrawRaisedButton(object sender, PaintEventArgs e)
+    {
+        var button = sender as Control;
+        if (button == null || button.Width < 20 || button.Height < 16) return;
+        bool primary = button.Tag is bool && (bool)button.Tag;
+        e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+        int left = 2;
+        int top = 2;
+        int right = button.Width - 3;
+        int bottom = button.Height - 3;
+        int radius = 9;
+
+        Color light = primary ? Color.FromArgb(190, 178, 171, 255) : Color.FromArgb(150, 255, 255, 255);
+        using (var pen = new Pen(light, 1f))
+        {
+            e.Graphics.DrawArc(pen, left, top, radius * 2, radius * 2, 180, 90);
+            e.Graphics.DrawArc(pen, right - radius * 2, top, radius * 2, radius * 2, 270, 90);
+            e.Graphics.DrawLine(pen, left + radius, top, right - radius, top);
+            e.Graphics.DrawLine(pen, left, top + radius, left, bottom - radius);
+        }
+
+        using (var pen = new Pen(Color.FromArgb(135, 0, 0, 0), 1f))
+        {
+            e.Graphics.DrawArc(pen, left, bottom - radius * 2, radius * 2, radius * 2, 90, 90);
+            e.Graphics.DrawArc(pen, right - radius * 2, bottom - radius * 2, radius * 2, radius * 2, 0, 90);
+            e.Graphics.DrawLine(pen, left + radius, bottom, right - radius, bottom);
+            e.Graphics.DrawLine(pen, right, top + radius, right, bottom - radius);
+        }
     }
 
     private AppButton ActionButton(string title, Action action, bool primary = false, string icon = null)
@@ -287,15 +334,15 @@ internal sealed class DeviceSettings : Form
 
     private Panel Page(string title, string subtitle, Control body, Control footer, Control headerAction, bool liveStatus = false)
     {
-        var panel = new Panel { Dock = DockStyle.Fill, Padding = new Padding(26, 22, 26, 20), BackColor = WindowTheme.Canvas };
-        var layout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 3, Margin = new Padding(0) };
+        var panel = new WallpaperPanel { Dock = DockStyle.Fill, Padding = new Padding(26, 22, 26, 20), Image = wallpaper };
+        var layout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 3, Margin = new Padding(0), BackColor = Color.Transparent };
         layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 100));
         layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        var header = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 1, Margin = new Padding(0) };
+        var header = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 1, Margin = new Padding(0), BackColor = Color.Transparent };
         header.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         header.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
-        var heading = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 2, Margin = new Padding(0) };
+        var heading = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 2, Margin = new Padding(0), BackColor = Color.Transparent };
         heading.RowStyles.Add(new RowStyle(SizeType.Absolute, 43));
         heading.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         heading.Controls.Add(new Label { Text = title, AutoSize = true, ForeColor = WindowTheme.Ink, Font = new Font("Microsoft YaHei UI", 23f, FontStyle.Bold), Margin = new Padding(0) }, 0, 0);
@@ -346,19 +393,25 @@ internal sealed class DeviceSettings : Form
 
     private void ShowPage(int page)
     {
-        if (content.Controls.Contains(pages[page])) return;
+        if (page < 0 || page >= pages.Length || currentPage == page) return;
         content.SuspendLayout();
-        content.Controls.Clear();
-        content.Controls.Add(pages[page]);
+        for (int i = 0; i < pages.Length; i++)
+        {
+            if (pages[i].Parent != content) content.Controls.Add(pages[i]);
+            pages[i].Visible = false;
+        }
+        pages[page].Visible = true;
+        pages[page].BringToFront();
+        currentPage = page;
         for (int i = 0; i < navigation.Length; i++)
         {
             navigation[i].Text = NavigationNames[i];
-            navigation[i].ForeColor = WindowTheme.Ink;
+            navigation[i].ForeColor = i == page ? WindowTheme.AccentLight : WindowTheme.Muted;
             navigation[i].ForeHover = WindowTheme.Ink;
             navigation[i].ForeActive = WindowTheme.Ink;
-            navigation[i].Type = i == page ? AntdUI.TTypeMini.Primary : AntdUI.TTypeMini.Default;
-            navigation[i].DefaultBack = navigation[i].BackColor = i == page ? WindowTheme.Accent : WindowTheme.Rail;
-            navigation[i].BorderWidth = i == page ? 1 : 0;
+            navigation[i].Type = AntdUI.TTypeMini.Default;
+            navigation[i].DefaultBack = navigation[i].BackColor = Color.Transparent;
+            navigation[i].BorderWidth = 0;
             navigation[i].Invalidate();
         }
         content.ResumeLayout(true);
@@ -376,6 +429,98 @@ internal sealed class DeviceSettings : Form
         catch (Exception) { }
     }
 
+    private static void DoubleBufferTree(Control root)
+    {
+        if (root == null) return;
+        foreach (Control child in root.Controls)
+        {
+            DoubleBuffer(child);
+            if (child.HasChildren) DoubleBufferTree(child);
+        }
+    }
+
+    private void BeginResizeSnapshot()
+    {
+        if (!IsHandleCreated || ClientSize.Width <= 0 || ClientSize.Height <= 0) return;
+        EndResizeSnapshot();
+        try
+        {
+            resizeSnapshot = new Bitmap(ClientSize.Width, ClientSize.Height);
+            DrawToBitmap(resizeSnapshot, new Rectangle(0, 0, ClientSize.Width, ClientSize.Height));
+            BackgroundImageLayout = ImageLayout.Stretch;
+            BackgroundImage = resizeSnapshot;
+            frame.Visible = false;
+        }
+        catch (Exception error)
+        {
+            AppLog.Warn("窗口缩放快照失败: " + error.Message);
+            if (resizeSnapshot != null) { resizeSnapshot.Dispose(); resizeSnapshot = null; }
+            BackgroundImage = null;
+            frame.Visible = true;
+        }
+    }
+
+    private void EndResizeSnapshot()
+    {
+        BackgroundImage = null;
+        frame.Visible = true;
+        if (resizeSnapshot != null)
+        {
+            resizeSnapshot.Dispose();
+            resizeSnapshot = null;
+        }
+        Invalidate(true);
+    }
+
+    private void EnableRaisedShadows(Control root)
+    {
+        if (root == null) return;
+        bool hasButton = false;
+        foreach (Control child in root.Controls)
+        {
+            if (child is AppButton) { hasButton = true; break; }
+        }
+        if (hasButton) root.Paint += DrawButtonShadows;
+        foreach (Control child in root.Controls)
+            if (child.HasChildren) EnableRaisedShadows(child);
+    }
+
+    private static void DrawButtonShadows(object sender, PaintEventArgs e)
+    {
+        var parent = sender as Control;
+        if (parent == null) return;
+        e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+        foreach (Control child in parent.Controls)
+        {
+            if (!(child is AppButton) || !child.Visible) continue;
+            Rectangle bounds = child.Bounds;
+            using (var soft = DeviceArtwork.Shape(
+                new Rectangle(bounds.X + 1, bounds.Y + 3, bounds.Width - 1, bounds.Height - 1), 11))
+            using (var brush = new SolidBrush(Color.FromArgb(58, 0, 0, 0)))
+                e.Graphics.FillPath(brush, soft);
+            using (var tight = DeviceArtwork.Shape(
+                new Rectangle(bounds.X + 2, bounds.Y + 2, bounds.Width - 3, bounds.Height - 3), 10))
+            using (var brush = new SolidBrush(Color.FromArgb(74, 0, 0, 0)))
+                e.Graphics.FillPath(brush, tight);
+        }
+    }
+
+    private void LoadFixedWallpaper()
+    {
+        try
+        {
+            using (var stream = Assembly.GetExecutingAssembly().GetManifestResourceStream("Wallpaper.png"))
+            {
+                if (stream == null) return;
+                using (var source = Image.FromStream(stream)) wallpaper = new Bitmap(source);
+            }
+        }
+        catch (Exception error)
+        {
+            AppLog.Warn("读取内置壁纸失败: " + error.Message);
+        }
+    }
+
     private Panel DevicePage()
     {
         DoubleBuffer(devices);
@@ -387,8 +532,7 @@ internal sealed class DeviceSettings : Form
         devices.BorderStyle = BorderStyle.None;
         devices.BackColor = WindowTheme.Canvas;
         devices.ForeColor = WindowTheme.Ink;
-        devices.DrawItem += DrawDevice;
-        devices.SelectedIndexChanged += delegate { UpdateButtons(); };
+
         devices.MouseDoubleClick += delegate(object sender, MouseEventArgs e)
         {
             int index = devices.IndexFromPoint(e.Location);
@@ -404,10 +548,11 @@ internal sealed class DeviceSettings : Form
         devices.MouseLeave += delegate { hoverIndex = -1; devices.Invalidate(); devices.Cursor = Cursors.Default; };
         devices.Resize += delegate { devices.Invalidate(); };
 
-        var listHost = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 2, Margin = new Padding(0) };
+        var listHost = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 3, Margin = new Padding(0), BackColor = Color.Transparent };
         listHost.RowStyles.Add(new RowStyle(SizeType.Absolute, 31));
         listHost.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-        var listHeader = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 1, Margin = new Padding(0) };
+        listHost.RowStyles.Add(new RowStyle(SizeType.Absolute, 40));
+        var listHeader = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 1, Margin = new Padding(0), BackColor = Color.Transparent };
         listHeader.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         listHeader.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
         listHeader.Controls.Add(TextLabel("设备列表", 10f, WindowTheme.Ink, true), 0, 0);
@@ -419,20 +564,32 @@ internal sealed class DeviceSettings : Form
         listHeader.Controls.Add(listCount, 1, 0);
         listHost.Controls.Add(listHeader, 0, 0);
 
-        var listBody = new Panel { Dock = DockStyle.Fill, BackColor = WindowTheme.Canvas };
-        devices.Margin = new Padding(0);
-        listBody.Controls.Add(devices);
+        var listBody = new ClickablePanel { Dock = DockStyle.Fill };
+        listBody.Controls.Add(rowHost);
         emptyHint.Dock = DockStyle.Fill;
         emptyHint.TextAlign = ContentAlignment.MiddleCenter;
         emptyHint.ForeColor = WindowTheme.Muted;
         emptyHint.Font = new Font("Microsoft YaHei UI", 9.6f);
-        emptyHint.BackColor = WindowTheme.Canvas;
+        emptyHint.BackColor = Color.Transparent;
         emptyHint.Text = "正在准备设备列表…";
         listBody.Controls.Add(emptyHint);
         emptyHint.BringToFront();
         listHost.Controls.Add(listBody, 0, 1);
+        var deleteRow = new FlowLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            FlowDirection = FlowDirection.RightToLeft,
+            WrapContents = false,
+            BackColor = Color.Transparent,
+            Padding = new Padding(0, 5, 0, 0)
+        };
+        var deleteButton = ActionButton("删除设备", DeleteSelected, false, "DeleteOutlined");
+        deleteButton.Size = new Size(112, 31);
+        deleteButton.Font = new Font("Microsoft YaHei UI", 8.7f);
+        deleteRow.Controls.Add(deleteButton);
+        listHost.Controls.Add(deleteRow, 0, 2);
 
-        var body = new TableLayoutPanel { ColumnCount = 2, RowCount = 1, Margin = new Padding(0) };
+        var body = new TableLayoutPanel { ColumnCount = 2, RowCount = 1, Margin = new Padding(0), BackColor = Color.Transparent };
         body.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 63));
         body.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 37));
         listHost.Margin = new Padding(0, 0, 16, 0);
@@ -466,17 +623,13 @@ internal sealed class DeviceSettings : Form
 
     private Control DeviceDetails()
     {
-        var card = new AntdUI.Panel
+        var card = new TransparentPanel
         {
             Dock = DockStyle.Fill,
-            Radius = 12,
-            Back = WindowTheme.Surface,
-            BorderWidth = 1,
-            BorderColor = WindowTheme.Line,
             Margin = new Padding(0),
             Padding = new Padding(16)
         };
-        var scroll = new Panel { Dock = DockStyle.Fill, AutoScroll = true, BackColor = WindowTheme.Surface, Margin = new Padding(0) };
+        var scroll = new TransparentPanel { Dock = DockStyle.Fill, AutoScroll = true, Margin = new Padding(0) };
         var stack = new TableLayoutPanel
         {
             Dock = DockStyle.Top,
@@ -520,7 +673,7 @@ internal sealed class DeviceSettings : Form
         stack.Controls.Add(chosenDetail, 0, 4);
 
         detailTip.ForeColor = WindowTheme.Muted;
-        detailTip.BackColor = WindowTheme.Rail;
+        detailTip.BackColor = Color.Transparent;
         detailTip.Font = new Font("Microsoft YaHei UI", 8.8f);
         detailTip.Padding = new Padding(10, 8, 10, 8);
         detailTip.Margin = new Padding(0, 2, 0, 2);
@@ -582,59 +735,159 @@ internal sealed class DeviceSettings : Form
         await RefreshDevicesAsync();
     }
 
-    private void DrawDevice(object sender, DrawItemEventArgs e)
+    private void RebuildRows()
     {
-        if (e.Index < 0 || e.Index >= devices.Items.Count) return;
-        var row = (DeviceRecord)devices.Items[e.Index];
-        bool selected = (e.State & DrawItemState.Selected) != 0;
-        bool hover = hoverIndex == e.Index;
-        var bounds = e.Bounds;
-        using (var clear = new SolidBrush(WindowTheme.Canvas)) e.Graphics.FillRectangle(clear, bounds);
-        e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
-        var tile = Rectangle.Inflate(bounds, -2, -4);
-        if (tile.Width < 40 || tile.Height < 30) return;
-        using (var path = DeviceArtwork.Shape(tile, 10))
-        using (var fill = new SolidBrush(selected ? Color.FromArgb(45, 43, 82) : hover ? Color.FromArgb(37, 44, 65) : WindowTheme.Surface))
-        using (var line = new Pen(selected ? WindowTheme.AccentLight : WindowTheme.Line, selected ? 1.2f : 1f))
+        if (rowHost == null) return;
+        rowHost.SuspendLayout();
+        rowHost.Controls.Clear();
+        for (int i = devices.Items.Count - 1; i >= 0; i--)
         {
-            e.Graphics.FillPath(fill, path);
-            e.Graphics.DrawPath(line, path);
+            var device = (DeviceRecord)devices.Items[i];
+            string model = device.Model == device.Name ? "Android 无线调试" : device.Model;
+            string text = FixedRow(device.Name, 26) + FixedRow(model, 18) +
+                (device.Online ? "● 在线" : "○ 离线");
+            var row = new AppButton
+            {
+                Text = text,
+                AccessibleName = device.Name + " " + (device.Online ? "在线" : "离线"),
+                Dock = DockStyle.Top,
+                Height = 66,
+                Margin = new Padding(0, 0, 0, 7),
+                Padding = new Padding(16, 0, 12, 0),
+                Radius = 10,
+                TextAlign = ContentAlignment.MiddleLeft,
+                Font = new Font("Consolas", 9.5f, FontStyle.Bold),
+                IconSvg = MirrorIcons.Smartphone,
+                IconRatio = 0.9f,
+                BackColor = Color.Transparent,
+                DefaultBack = Color.Transparent,
+                BackHover = Color.FromArgb(26, 255, 255, 255),
+                BorderWidth = 0,
+                ForeColor = selectedRows.Contains(i) ? WindowTheme.AccentLight : WindowTheme.Ink,
+                ForeHover = WindowTheme.Ink,
+                ForeActive = WindowTheme.Ink,
+                TabStop = false,
+                Cursor = Cursors.Hand
+            };
+            int index = i;
+            row.Click += delegate { SelectRow(index); };
+            row.MouseDown += delegate(object sender, MouseEventArgs args)
+            {
+                if (args.Button == MouseButtons.Left && args.Clicks == 2) OpenRow(index);
+            };
+            rowHost.Controls.Add(row);
         }
-        if (selected)
-        {
-            using (var accent = new SolidBrush(WindowTheme.AccentLight))
-                e.Graphics.FillRectangle(accent, tile.Left + 1, tile.Top + 12, 3, tile.Height - 24);
-        }
-
-        int iconX = tile.Left + 13;
-        int iconY = tile.Top + (tile.Height - 38) / 2;
-        using (var iconBack = new SolidBrush(selected ? Color.FromArgb(69, 59, 125) : Color.FromArgb(45, 52, 77)))
-            e.Graphics.FillEllipse(iconBack, iconX, iconY, 38, 38);
-        if (phoneIcon != null) e.Graphics.DrawImage(phoneIcon, iconX + 8, iconY + 8, 22, 22);
-
-        int rightWidth = Math.Min(178, Math.Max(114, tile.Width / 3));
-        int rightX = tile.Right - rightWidth - 10;
-        int textX = iconX + 51;
-        int nameWidth = Math.Max(60, rightX - textX - 8);
-        var flags = TextFormatFlags.EndEllipsis | TextFormatFlags.SingleLine | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix;
-        TextRenderer.DrawText(e.Graphics, row.Name, deviceNameFont,
-            new Rectangle(textX, tile.Top + 8, nameWidth, 27), WindowTheme.Ink, flags);
-        string model = row.Model == row.Name ? "Android 无线调试" : row.Model;
-        TextRenderer.DrawText(e.Graphics, model, smallFont,
-            new Rectangle(textX, tile.Top + 38, nameWidth, 22), WindowTheme.Muted, flags);
-        string stream = GetStreamStatus(row);
-        string state = stream != null ? "● " + stream : row.Online ? "● 在线" : "○ 离线";
-        TextRenderer.DrawText(e.Graphics, state, smallFont,
-            new Rectangle(rightX, tile.Top + 8, rightWidth, 25), stream != null ? WindowTheme.AccentLight : row.Online ? WindowTheme.Green : WindowTheme.Faint,
-            flags | TextFormatFlags.Right);
-        string last = row.LastUsed == DateTime.MinValue ? "尚未投屏" : Relative(row.LastUsed) + " · " + row.Connections + " 次";
-        TextRenderer.DrawText(e.Graphics, last, tinyFont,
-            new Rectangle(rightX, tile.Top + 38, rightWidth, 20), WindowTheme.Faint,
-            flags | TextFormatFlags.Right);
-        using (var separator = new Pen(Color.FromArgb(46, 55, 78)))
-            e.Graphics.DrawLine(separator, textX, tile.Bottom - 1, tile.Right - 12, tile.Bottom - 1);
+        rowHost.ResumeLayout();
     }
 
+    private static string FixedRow(string value, int width)
+    {
+        if (value == null) value = "";
+        if (value.Length >= width) return value.Substring(0, Math.Max(0, width - 1)) + " ";
+        return value.PadRight(width);
+    }
+
+    private static AppButton RowCell(string text, float size, Color color,
+        ContentAlignment align, Font font)
+    {
+        return new AppButton
+        {
+            Text = text,
+            Dock = DockStyle.Fill,
+            Margin = new Padding(0),
+            Padding = new Padding(0),
+            Radius = 0,
+            TextAlign = align,
+            Font = font,
+            BackColor = Color.Transparent,
+            DefaultBack = Color.Transparent,
+            BackHover = Color.Transparent,
+            BackActive = Color.Transparent,
+            BorderWidth = 0,
+            ForeColor = color,
+            ForeHover = WindowTheme.Ink,
+            ForeActive = WindowTheme.Ink,
+            TabStop = false,
+            Cursor = Cursors.Hand,
+            AccessibleName = text
+        };
+    }
+    public bool PreFilterMessage(ref Message message)
+    {
+        if (message.Msg != 0x0201 && message.Msg != 0x0203) return false;
+        if (rowHost == null || rowHost.IsDisposed || !rowHost.Visible) return false;
+        if (!content.Controls.Contains(pages[0]) || !pages[0].Visible) return false;
+        Point local = rowHost.PointToClient(Control.MousePosition);
+        if (!rowHost.ClientRectangle.Contains(local)) return false;
+        foreach (Control row in rowHost.Controls)
+        {
+            if (!row.Bounds.Contains(local)) continue;
+            int index = row.Tag is int ? (int)row.Tag : -1;
+            if (index < 0 || index >= devices.Items.Count) return false;
+            SelectRow(index);
+            if (message.Msg == 0x0203) OpenRow(index);
+            return true;
+        }
+        return false;
+    }
+
+    private void PageMouseDown(object sender, MouseEventArgs e)
+    {
+        var page = sender as Control;
+        if (page == null || !page.Visible || rowHost == null || !rowHost.Visible) return;
+        if (!content.Controls.Contains(pages[0]) || !pages[0].Visible) return;
+        if (e.Button != MouseButtons.Left) return;
+        Point local = rowHost.PointToClient(page.PointToScreen(e.Location));
+        if (!rowHost.ClientRectangle.Contains(local)) return;
+        foreach (Control control in rowHost.Controls)
+        {
+            if (!control.Bounds.Contains(local)) continue;
+            int index = -1;
+            if (control is TableLayoutPanel)
+            {
+                object tag = control.Tag;
+                if (tag is int) index = (int)tag;
+                else
+                {
+                    // Row panels are added from the end backwards; find their index by order.
+                    index = rowHost.Controls.GetChildIndex(control);
+                    index = devices.Items.Count - 1 - index;
+                }
+            }
+            if (index >= 0 && index < devices.Items.Count)
+            {
+                SelectRow(index);
+                if (e.Clicks == 2) OpenRow(index);
+                return;
+            }
+        }
+    }
+
+    private void SelectRow(int index)
+    {
+        if (index < 0 || index >= devices.Items.Count) return;
+        if ((ModifierKeys & Keys.Control) == Keys.Control)
+        {
+            if (!selectedRows.Add(index)) selectedRows.Remove(index);
+        }
+        else
+        {
+            selectedRows.Clear();
+            selectedRows.Add(index);
+        }
+        RebuildRows();
+        UpdateButtons();
+    }
+
+    private void OpenRow(int index)
+    {
+        if (index < 0 || index >= devices.Items.Count) return;
+        selectedRows.Clear();
+        selectedRows.Add(index);
+        RebuildRows();
+        UpdateButtons();
+        PickSelected();
+    }
     private static string Relative(DateTime value)
     {
         var local = value.ToLocalTime();
@@ -645,8 +898,8 @@ internal sealed class DeviceSettings : Form
 
     private Panel KeyPage()
     {
-        var host = new Panel { Dock = DockStyle.Fill, BackColor = WindowTheme.Surface, Padding = new Padding(18, 12, 10, 10), AutoScroll = true };
-        var list = new TableLayoutPanel { Dock = DockStyle.Top, AutoSize = true, ColumnCount = 2, RowCount = 11, BackColor = WindowTheme.Surface, Margin = new Padding(0) };
+        var host = new Panel { Dock = DockStyle.Fill, BackColor = Color.Transparent, Padding = new Padding(18, 12, 10, 10), AutoScroll = false };
+        var list = new TableLayoutPanel { Dock = DockStyle.Top, AutoSize = true, ColumnCount = 2, RowCount = 11, BackColor = Color.Transparent, Margin = new Padding(0) };
         list.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 190));
         list.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         string[,] keys = {
@@ -888,7 +1141,7 @@ internal sealed class DeviceSettings : Form
 
     private static TableLayoutPanel SettingCard(string title, string hint)
     {
-        var card = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 3, BackColor = WindowTheme.Surface, Padding = new Padding(13, 10, 10, 7), Margin = new Padding(0, 0, 10, 10) };
+        var card = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 3, BackColor = Color.Transparent, Padding = new Padding(13, 10, 10, 7), Margin = new Padding(0, 0, 10, 10) };
         card.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         card.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 100));
         card.RowStyles.Add(new RowStyle(SizeType.Absolute, 24));
@@ -1066,15 +1319,25 @@ internal sealed class DeviceSettings : Form
         }
     }
 
-    private DeviceRecord Current() { return devices.SelectedItem as DeviceRecord; }
+    private DeviceRecord Current()
+    {
+        foreach (int index in selectedRows)
+            if (index >= 0 && index < devices.Items.Count) return devices.Items[index] as DeviceRecord;
+        return null;
+    }
 
     private void UpdateButtons()
     {
         var row = Current();
-        var selected = devices.SelectedItems.Cast<DeviceRecord>().ToArray();
+        var selected = selectedRows
+            .Where(index => index >= 0 && index < devices.Items.Count)
+            .Select(index => devices.Items[index])
+            .Cast<DeviceRecord>()
+            .ToArray();
         connect.Enabled = selected.Any(item => item.Online || GetStreamStatus(item) != null);
         connect.Text = selected.Length > 1 ? "打开所选" :
             row != null && GetStreamStatus(row) != null ? "切到投屏" : "打开投屏";
+        delete.Enabled = selected.Length > 0;
         rename.Enabled = row != null && row.Id != null;
         history.Enabled = row != null && row.LastUsed != DateTime.MinValue;
         artwork.ShowStatus(row != null && row.Online);
@@ -1132,7 +1395,11 @@ internal sealed class DeviceSettings : Form
 
     private void PickSelected()
     {
-        var selected = devices.SelectedItems.Cast<DeviceRecord>().ToArray();
+        var selected = selectedRows
+            .Where(index => index >= 0 && index < devices.Items.Count)
+            .Select(index => devices.Items[index])
+            .Cast<DeviceRecord>()
+            .ToArray();
         foreach (var row in selected) Pick(row);
     }
 
@@ -1221,6 +1488,34 @@ internal sealed class DeviceSettings : Form
         deviceStatus.ForeColor = color;
     }
 
+    private void DeleteSelected()
+    {
+        var selected = selectedRows
+            .Where(index => index >= 0 && index < devices.Items.Count)
+            .Select(index => devices.Items[index])
+            .Cast<DeviceRecord>()
+            .ToArray();
+        if (selected.Length == 0)
+        {
+            SetNotice("请先选择要删除的设备。", WindowTheme.Amber);
+            return;
+        }
+        string names = String.Join("、", selected.Select(item => item.Name).ToArray());
+        if (MessageBox.Show(this, "从设备历史中删除：\n" + names + "\n\n在线设备下次刷新时可能重新出现。",
+            "删除设备", MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes) return;
+
+        var removed = new HashSet<DeviceRecord>();
+        foreach (var item in selected)
+        {
+            directory.Remove(item);
+            removed.Add(item);
+        }
+        rows = rows.Where(item => !removed.Contains(item)).ToList();
+        selectedRows.Clear();
+        Fill(rows);
+        SetNotice("已删除 " + removed.Count + " 台设备。", WindowTheme.Green);
+    }
+
     private void Rename()
     {
         var row = Current();
@@ -1290,9 +1585,11 @@ internal sealed class DeviceSettings : Form
                 index = rows.FindIndex(row => row.Serial == previousSerial);
             if (index < 0) index = rows.FindIndex(row => row.Online);
             if (index < 0 && rows.Count > 0) index = 0;
-            devices.SelectedIndex = index;
+            selectedRows.Clear();
+            if (index >= 0) selectedRows.Add(index);
         }
         finally { devices.EndUpdate(); }
+        RebuildRows();
         emptyHint.Visible = rows.Count == 0;
         if (rows.Count == 0) emptyHint.BringToFront();
         int online = rows.Count(item => item.Online);
@@ -1323,6 +1620,7 @@ internal sealed class DeviceSettings : Form
     {
         if (disposing)
         {
+            Application.RemoveMessageFilter(this);
             statusTimer.Dispose();
             tooltips.Dispose();
             deviceNameFont.Dispose();
@@ -1330,6 +1628,7 @@ internal sealed class DeviceSettings : Form
             tinyFont.Dispose();
             if (phoneIcon != null) phoneIcon.Dispose();
             if (appIcon != null) appIcon.Dispose();
+            if (wallpaper != null) wallpaper.Dispose();
         }
         base.Dispose(disposing);
     }
