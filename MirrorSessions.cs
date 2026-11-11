@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Drawing;
@@ -174,14 +174,9 @@ internal sealed class MirrorSessions : IDisposable
                             if (settings.ShowDialog(center) != DialogResult.OK || closing) return;
                             var chosen = settings.SavedProfile;
                             if (chosen == null) return;
-                            if (chosen.Options == session.Profile.Options)
-                            {
-                                session.Profile = chosen;
-                                WirelessMirror.FocusWindow(WirelessMirror.MirrorWindow(mirror));
-                                return;
-                            }
                             replacement = chosen;
-                            AppLog.Info("连接设置已变化，重启当前投屏: " + device.Name);
+                            session.Profile = chosen;
+                            AppLog.Info("连接设置已保存，重启当前投屏: " + device.Name);
                             // CloseMainWindow() can be ignored by the custom scrcpy
                             // window; Stop() guarantees the old process is gone
                             // before the loop starts the new profile.
@@ -279,16 +274,11 @@ internal sealed class MirrorSessions : IDisposable
         if (closing || device == null || device.Id == null || profile == null) return;
         Session session;
         if (!sessions.TryGetValue(device.Id, out session)) return;
-        if (session.Profile.Options == profile.Options)
-        {
-            session.Profile = profile;
-            return;
-        }
         session.Profile = profile.Copy();
         if (session.Process != null && !session.Process.HasExited)
         {
             session.RestartRequested = true;
-            AppLog.Info("设备中心设置已变化，重启投屏: " + device.Name);
+            AppLog.Info("设备中心设置已保存，重启投屏: " + device.Name);
             Stop(session.Process);
         }
     }
