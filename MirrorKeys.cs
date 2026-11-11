@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
@@ -16,6 +16,7 @@ internal sealed class MirrorKeys : IDisposable
     private readonly Action<AudioRoute> changeAudio;
     private IntPtr hook;
     private int settingsPage;
+    private int rotating;
     private readonly HashSet<int> heldKeys = new HashSet<int>();
 
     [DllImport("user32.dll", SetLastError = true)]
@@ -72,7 +73,7 @@ internal sealed class MirrorKeys : IDisposable
                         try { rememberConnection(window); }
                         catch (Exception historyError)
                         {
-                            tray.ShowBalloonTip(4000, "安卓无线投屏",
+                            tray.ShowBalloonTip(4000, "手机投屏",
                                 "本次连接记录未能保存：" + historyError.Message, ToolTipIcon.Warning);
                         }
                         if (WirelessMirror.IsLocked(serial))
@@ -84,7 +85,7 @@ internal sealed class MirrorKeys : IDisposable
                 }
                 catch (Exception error)
                 {
-                    MessageBox.Show(error.Message, "安卓无线投屏", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    MessageBox.Show(error.Message, "手机投屏", MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 }
                 finally { timer.Start(); }
             };
@@ -101,7 +102,7 @@ internal sealed class MirrorKeys : IDisposable
         menu.Items.Add("连接设置", null, delegate { settingsPage = 3; });
         menu.Items.Add(new ToolStripSeparator());
         var rotate = new ToolStripMenuItem("旋转屏幕");
-        rotate.ShortcutKeyDisplayString = "F11";
+        rotate.ShortcutKeyDisplayString = "Ctrl+R";
         rotate.Click += delegate { Task.Run(delegate { Rotate(); }); };
         menu.Items.Add(rotate);
         menu.Items.Add("恢复自动旋转", null, delegate { Task.Run(delegate { AutoRotate(); }); });
@@ -126,12 +127,27 @@ internal sealed class MirrorKeys : IDisposable
         int key = Marshal.ReadInt32(data);
         bool up = message.ToInt64() == 0x101 || message.ToInt64() == 0x105;
         if (up && heldKeys.Remove(key)) return new IntPtr(1);
-        if (key < (int)Keys.F2 || key > (int)Keys.F11 || up)
-            return CallNextHookEx(hook, code, message, data);
+        if (up) return CallNextHookEx(hook, code, message, data);
 
         uint foregroundProcess;
         GetWindowThreadProcessId(GetForegroundWindow(), out foregroundProcess);
-        if (foregroundProcess != (uint)mirror.Id || Control.ModifierKeys != Keys.None)
+        if (foregroundProcess != (uint)mirror.Id)
+            return CallNextHookEx(hook, code, message, data);
+
+        Keys modifiers = Control.ModifierKeys;
+        if (key == (int)Keys.F1 && modifiers == Keys.None)
+        {
+            if (!heldKeys.Add(key)) return new IntPtr(1);
+            settingsPage = 1;
+            return new IntPtr(1);
+        }
+        if (key == (int)Keys.R && modifiers == Keys.Control)
+        {
+            if (!heldKeys.Add(key)) return new IntPtr(1);
+            Task.Run(delegate { Rotate(); });
+            return new IntPtr(1);
+        }
+        if (key < (int)Keys.F2 || key > (int)Keys.F9 || modifiers != Keys.None)
             return CallNextHookEx(hook, code, message, data);
         if (!heldKeys.Add(key)) return new IntPtr(1);
 
@@ -145,16 +161,16 @@ internal sealed class MirrorKeys : IDisposable
             case Keys.F7: SendShortcut((byte)'B', false); break;
             case Keys.F8: SendShortcut((byte)'O', false); break;
             case Keys.F9: SendShortcut((byte)'O', true); break;
-            case Keys.F10: settingsPage = 1; break;
-            case Keys.F11: Task.Run(delegate { Rotate(); }); break;
         }
         return new IntPtr(1);
     }
 
     private void Rotate()
     {
+        if (Interlocked.Exchange(ref rotating, 1) != 0) return;
         try { WirelessMirror.Rotate(serial); }
         catch (Exception error) { AppLog.Warn("手动旋转屏幕失败: " + error.Message); }
+        finally { Interlocked.Exchange(ref rotating, 0); }
     }
 
     private void AutoRotate()

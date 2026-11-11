@@ -345,6 +345,20 @@ internal sealed class DeviceDirectory
         }
     }
 
+    public void Remove(DeviceRecord record)
+    {
+        if (record == null) return;
+        lock (gate)
+        {
+            var current = record.Id != null
+                ? saved.FirstOrDefault(item => item.Id == record.Id)
+                : saved.FirstOrDefault(item => item.Model == record.Model && item.Alias == record.Alias);
+            if (current == null) return;
+            saved.Remove(current);
+            SaveLocked();
+        }
+    }
+
     public void RememberConnection(DeviceRecord record)
     {
         if (record.Id == null) return;

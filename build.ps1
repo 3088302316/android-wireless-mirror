@@ -37,15 +37,17 @@ Copy-Item -LiteralPath $manifestPath -Destination $buildManifest -Force
 try {
     $common = @('/nologo','/target:winexe','/platform:x64','/langversion:5','/codepage:65001','/optimize+',
         "/win32icon:$buildIcon","/win32manifest:$buildManifest")
-    & $compiler @common @refs ('/out:' + (Join-Path $out '安卓无线投屏.exe')) @sources
+    & $compiler @common @refs ('/out:' + (Join-Path $out '手机投屏.exe')) @sources
     if ($LASTEXITCODE -ne 0) { throw 'Build failed.' }
 }
 finally {
     Remove-Item -LiteralPath $buildIcon -Force -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath $buildManifest -Force -ErrorAction SilentlyContinue
 }
-$legacyPhoneAudio = Join-Path $out '安卓无线投屏-手机出声.exe'
+$legacyPhoneAudio = Join-Path $out '手机投屏-手机出声.exe'
 if (Test-Path -LiteralPath $legacyPhoneAudio) { Remove-Item -LiteralPath $legacyPhoneAudio -Force }
+$legacyApp = Join-Path $out '安卓无线投屏.exe'
+if (Test-Path -LiteralPath $legacyApp) { Remove-Item -LiteralPath $legacyApp -Force }
 
 foreach ($file in $runtimeFiles) { Copy-Item -LiteralPath $file -Destination $out -Force }
 foreach ($name in @('投屏.ico','使用说明.txt','LICENSE.txt','AntdUI-LICENSE.txt','QRCoder-LICENSE.txt','Lucide-LICENSE.txt')) {

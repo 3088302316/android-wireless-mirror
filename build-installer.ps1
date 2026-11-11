@@ -13,9 +13,9 @@ $staging = Join-Path $tempRoot ('AndroidWirelessMirrorBuild-' + [guid]::NewGuid(
 New-Item -ItemType Directory -Path $staging | Out-Null
 try {
     $payload = & (Join-Path $PSScriptRoot 'build.ps1') -RuntimeDirectory $RuntimeDirectory `
-        -OutputDirectory (Join-Path $staging '安卓无线投屏便携版')
+        -OutputDirectory (Join-Path $staging '手机投屏便携版')
     Add-Type -AssemblyName System.IO.Compression.FileSystem
-    $archiveName = '安卓无线投屏便携版-Windows-x64.zip'
+    $archiveName = '手机投屏便携版-Windows-x64.zip'
     $archive = Join-Path $staging $archiveName
     [IO.Compression.ZipFile]::CreateFromDirectory($payload, $archive, [IO.Compression.CompressionLevel]::Optimal, $true)
     $arguments = @("/O$release", "/DPayloadDir=$payload")

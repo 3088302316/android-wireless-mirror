@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Drawing;
@@ -12,7 +12,7 @@ using System.Windows.Forms;
 
 internal static class WirelessMirror
 {
-    private const string Title = "安卓无线投屏";
+    private const string Title = "手机投屏";
     private static readonly string Root = AppPaths.Root;
 
     [DllImport("user32.dll")]
@@ -180,7 +180,7 @@ internal static class WirelessMirror
 
     private static bool FocusSettings()
     {
-        foreach (string name in new[] { "安卓无线投屏" })
+        foreach (string name in new[] { "手机投屏" })
         foreach (var process in Process.GetProcessesByName(name))
         {
             using (process)

@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Drawing;
@@ -26,10 +26,12 @@ internal sealed class DeviceSettings : Form
     private readonly Label detailTip = new Label();
     private readonly AntdUI.Tag chosenState = new AntdUI.Tag();
     private readonly Panel content = new Panel { Dock = DockStyle.Fill };
+    private int currentPage = -1;
+    private TableLayoutPanel frame;
     private readonly Panel[] pages = new Panel[3];
     private readonly AppButton[] navigation = new AppButton[3];
     private static readonly string[] NavigationNames = { "设备管理", "快捷键", "连接设置" };
-    private readonly AppButton connect, rename, history, lowLatency, refresh, pairQr, pairCode;
+    private readonly AppButton connect, rename, history, lowLatency, refresh, delete, pairQr, pairCode;
     private readonly Label profileStatus = new Label();
     private readonly AppButton applyProfile, probeButton, networkButton, logButton;
     private readonly ConnectionProfile draft;
@@ -58,6 +60,11 @@ internal sealed class DeviceSettings : Form
     [DllImport("user32.dll")]
     private static extern bool SetForegroundWindow(IntPtr window);
 
+    [DllImport("user32.dll")]
+    private static extern IntPtr SendMessage(IntPtr window, uint message, IntPtr wParam, IntPtr lParam);
+
+    private const uint WM_SETREDRAW = 0x000B;
+
     public DeviceSettings(DeviceDirectory directory, List<DeviceRecord> rows, int page, DeviceRecord active = null, ConnectionProfile profile = null)
     {
         this.directory = directory;
@@ -74,7 +81,7 @@ internal sealed class DeviceSettings : Form
         appIcon = loadedIcon.ToBitmap();
         if (!ReferenceEquals(loadedIcon, SystemIcons.Application)) loadedIcon.Dispose();
 
-        Text = active == null ? "安卓无线投屏 · 设备中心" : active.Name + " · 投屏设置";
+        Text = active == null ? "手机投屏 · 设备中心" : active.Name + " · 投屏设置";
         Icon = WirelessMirror.LoadIcon();
         StartPosition = FormStartPosition.CenterScreen;
         AutoScaleMode = AutoScaleMode.Font;
@@ -88,7 +95,7 @@ internal sealed class DeviceSettings : Form
         TopMost = active != null;
         WindowTheme.Attach(this);
 
-        var frame = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 1, Margin = new Padding(0) };
+        frame = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 1, Margin = new Padding(0) };
         frame.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 206));
         frame.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         Controls.Add(frame);
@@ -104,6 +111,9 @@ internal sealed class DeviceSettings : Form
         lowLatency.Size = new Size(96, 46);
         refresh = ActionButton("刷新设备", delegate { RefreshFromButton(); }, false, MirrorIcons.Refresh);
         refresh.Size = new Size(112, 40);
+        delete = ActionButton("删除设备", DeleteSelected, false, "DeleteOutlined");
+        delete.Size = new Size(112, 40);
+        tooltips.SetToolTip(delete, "从设备历史中删除选中的设备；在线设备仍可能被重新扫描到");
         pairQr = ActionButton("扫码配对", PairWithQr, false, MirrorIcons.QrCode);
         pairCode = ActionButton("六位码配对", PairWithCode, false, MirrorIcons.Keyboard);
         tooltips.SetToolTip(refresh, "刷新设备列表（F5）");
@@ -126,6 +136,18 @@ internal sealed class DeviceSettings : Form
         pages[2] = QualityPage();
         Fill(rows);
         ShowPage(Math.Max(0, Math.Min(page, pages.Length - 1)));
+        DoubleBufferTree(this);
+        ResizeBegin += delegate
+        {
+            if (IsHandleCreated) SendMessage(Handle, WM_SETREDRAW, IntPtr.Zero, IntPtr.Zero);
+        };
+        ResizeEnd += delegate
+        {
+            if (!IsHandleCreated) return;
+            SendMessage(Handle, WM_SETREDRAW, new IntPtr(1), IntPtr.Zero);
+            Invalidate(true);
+            Update();
+        };
 
         statusTimer.Tick += delegate
         {
@@ -172,7 +194,7 @@ internal sealed class DeviceSettings : Form
         var brandText = new TableLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, ColumnCount = 1, RowCount = 2, Margin = new Padding(0) };
         brandText.RowStyles.Add(new RowStyle(SizeType.Absolute, 24));
         brandText.RowStyles.Add(new RowStyle(SizeType.Absolute, 20));
-        brandText.Controls.Add(new Label { Text = "安卓无线投屏", AutoSize = true, ForeColor = WindowTheme.Ink, Font = new Font("Microsoft YaHei UI", 12.4f, FontStyle.Bold), Margin = new Padding(0) }, 0, 0);
+        brandText.Controls.Add(new Label { Text = "手机投屏", AutoSize = true, ForeColor = WindowTheme.Ink, Font = new Font("Microsoft YaHei UI", 12.4f, FontStyle.Bold), Margin = new Padding(0) }, 0, 0);
         brandText.Controls.Add(new Label { Text = "局域网设备中心", AutoSize = true, ForeColor = WindowTheme.Faint, Font = new Font("Microsoft YaHei UI", 8.6f), Margin = new Padding(0) }, 0, 1);
         brand.Controls.Add(brandText, 1, 0);
         side.Controls.Add(brand, 0, 0);
@@ -346,10 +368,16 @@ internal sealed class DeviceSettings : Form
 
     private void ShowPage(int page)
     {
-        if (content.Controls.Contains(pages[page])) return;
+        if (page < 0 || page >= pages.Length || currentPage == page) return;
         content.SuspendLayout();
-        content.Controls.Clear();
-        content.Controls.Add(pages[page]);
+        for (int i = 0; i < pages.Length; i++)
+        {
+            if (pages[i].Parent != content) content.Controls.Add(pages[i]);
+            pages[i].Visible = false;
+        }
+        pages[page].Visible = true;
+        pages[page].BringToFront();
+        currentPage = page;
         for (int i = 0; i < navigation.Length; i++)
         {
             navigation[i].Text = NavigationNames[i];
@@ -374,6 +402,37 @@ internal sealed class DeviceSettings : Form
             if (property != null) property.SetValue(control, true, null);
         }
         catch (Exception) { }
+    }
+
+    private static void DoubleBufferTree(Control root)
+    {
+        if (root == null) return;
+        foreach (Control child in root.Controls)
+        {
+            DoubleBuffer(child);
+            if (child.HasChildren) DoubleBufferTree(child);
+        }
+    }
+
+    protected override void WndProc(ref Message message)
+    {
+        const int WM_SYSCOMMAND = 0x0112;
+        const int SC_MAXIMIZE = 0xF030;
+        const int SC_RESTORE = 0xF120;
+        int command = message.Msg == WM_SYSCOMMAND ? message.WParam.ToInt32() & 0xFFF0 : 0;
+        if (command == SC_MAXIMIZE || command == SC_RESTORE)
+        {
+            if (IsHandleCreated) SendMessage(Handle, WM_SETREDRAW, IntPtr.Zero, IntPtr.Zero);
+            base.WndProc(ref message);
+            if (IsHandleCreated)
+            {
+                SendMessage(Handle, WM_SETREDRAW, new IntPtr(1), IntPtr.Zero);
+                Invalidate(true);
+                Update();
+            }
+            return;
+        }
+        base.WndProc(ref message);
     }
 
     private Panel DevicePage()
@@ -451,7 +510,7 @@ internal sealed class DeviceSettings : Form
         primary.Controls.Add(rename);
         primary.Controls.Add(history);
         primary.Controls.Add(lowLatency);
-        if (active == null) primary.Controls.Add(AudioSelector(false));
+        primary.Controls.Add(delete);
         footer.Controls.Add(primary, 0, 1);
 
         var add = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Fill, WrapContents = true, Margin = new Padding(0, 4, 0, 0) };
@@ -652,7 +711,7 @@ internal sealed class DeviceSettings : Form
         string[,] keys = {
             {"F2 / 鼠标中键", "回手机主页"}, {"F3", "最近任务"}, {"F4 / F5", "展开 / 收起通知栏"},
             {"F6", "切换全屏"}, {"F7 / 鼠标右键", "返回"}, {"F8 / F9", "熄灭 / 点亮手机屏幕"},
-            {"F10", "打开设备管理"}, {"F11 / 托盘菜单", "旋转手机屏幕"}, {"左 Alt + ↑ / ↓", "调节手机音量"},
+            {"F1", "打开设备管理"}, {"Ctrl+R / 托盘菜单", "旋转手机屏幕"}, {"左 Alt + ↑ / ↓", "调节手机音量"},
             {"Ctrl + 左键拖动", "双指缩放"}, {"滚轮", "回到主页"}
         };
         for (int i = 0; i < keys.GetLength(0); i++)
@@ -1075,6 +1134,7 @@ internal sealed class DeviceSettings : Form
         connect.Enabled = selected.Any(item => item.Online || GetStreamStatus(item) != null);
         connect.Text = selected.Length > 1 ? "打开所选" :
             row != null && GetStreamStatus(row) != null ? "切到投屏" : "打开投屏";
+        delete.Enabled = selected.Length > 0;
         rename.Enabled = row != null && row.Id != null;
         history.Enabled = row != null && row.LastUsed != DateTime.MinValue;
         artwork.ShowStatus(row != null && row.Online);
@@ -1219,6 +1279,29 @@ internal sealed class DeviceSettings : Form
     {
         deviceStatus.Text = text;
         deviceStatus.ForeColor = color;
+    }
+
+    private void DeleteSelected()
+    {
+        var selected = devices.SelectedItems.Cast<DeviceRecord>().ToArray();
+        if (selected.Length == 0)
+        {
+            SetNotice("请先选择要删除的设备。", WindowTheme.Amber);
+            return;
+        }
+        string names = String.Join("、", selected.Select(item => item.Name).ToArray());
+        if (MessageBox.Show(this, "从设备历史中删除：\n" + names + "\n\n在线设备下次刷新时可能重新出现。",
+            "删除设备", MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes) return;
+
+        var removed = new HashSet<DeviceRecord>();
+        foreach (var item in selected)
+        {
+            directory.Remove(item);
+            removed.Add(item);
+        }
+        rows = rows.Where(item => !removed.Contains(item)).ToList();
+        Fill(rows);
+        SetNotice("已删除 " + removed.Count + " 台设备。", WindowTheme.Green);
     }
 
     private void Rename()
