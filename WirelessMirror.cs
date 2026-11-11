@@ -108,9 +108,10 @@ internal static class WirelessMirror
         string options = "--serial=" + device.Serial + (locked ? " " : " --turn-screen-off ") +
             "--window-height=800 --video-codec=h264 --hwdec=auto " +
             profile.Options + " --window-title=\"" + Caption(device) + "\"";
+        string executable = profile.ShowStats ? "scrcpy-stats.exe" : "scrcpy.exe";
         AppLog.Info("开始投屏: " + device.Name + " / " + device.Serial + " / " +
-            (locked ? "锁屏" : "已解锁") + " / " + profile.Options);
-        var start = StartInfo("scrcpy.exe", options);
+            (locked ? "锁屏" : "已解锁") + " / " + executable + " / " + profile.Options);
+        var start = StartInfo(executable, options);
         start.RedirectStandardError = true;
         start.StandardErrorEncoding = Encoding.UTF8;
         start.EnvironmentVariables["ANDROID_MIRROR_MENU_WINDOW"] =

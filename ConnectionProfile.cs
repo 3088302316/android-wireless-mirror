@@ -22,6 +22,7 @@ internal sealed class ConnectionProfile
     [DataMember] public int AudioBuffer = 50;
     [DataMember] public bool AutoReconnect = true;
     [DataMember] public AudioRoute Audio = AudioRoute.Pc;
+    [DataMember] public bool ShowStats;
     [DataMember(EmitDefaultValue = false)] public bool PhoneAudio;
 
     private static readonly DataContractJsonSerializer Serializer = new DataContractJsonSerializer(typeof(ConnectionProfile));
@@ -48,6 +49,7 @@ internal sealed class ConnectionProfile
                     options += " --audio-source=playback";
                     break;
             }
+            if (ShowStats) options += " --print-fps";
             // Always use absolute SDK mouse input: the cursor remains a normal
             // desktop cursor and can leave the mirror window.
             options += " --mouse=sdk";

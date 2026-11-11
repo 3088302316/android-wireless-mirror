@@ -36,6 +36,7 @@ internal sealed class DeviceSettings : Form
     private AntdUI.Slider sizeSlider, fpsSlider, bitrateSlider, videoBufferSlider, audioBufferSlider;
     private Label sizeReading, fpsReading, bitrateReading, videoBufferReading, audioBufferReading;
     private AppButton audioButton, settingsAudioButton;
+    private AntdUI.Switch statsSwitch;
     private ContextMenuStrip audioMenu;
     private readonly Timer statusTimer = new Timer { Interval = 8000 };
     private readonly ToolTip tooltips = new ToolTip();
@@ -791,6 +792,28 @@ internal sealed class DeviceSettings : Form
         bar.Controls.Add(audioLabel);
         settingsAudioButton = AudioSelector(true);
         bar.Controls.Add(settingsAudioButton);
+        var statsLabel = TextLabel("实时统计", 9f, WindowTheme.Faint, true);
+        statsLabel.Margin = new Padding(18, 10, 8, 0);
+        bar.Controls.Add(statsLabel);
+        statsSwitch = new AntdUI.Switch
+        {
+            Checked = draft.ShowStats,
+            Fill = WindowTheme.Accent,
+            Width = 52,
+            Height = 30,
+            AccessibleName = "显示实时统计",
+            Margin = new Padding(0, 5, 6, 0)
+        };
+        statsSwitch.CheckedChanged += delegate
+        {
+            draft.ShowStats = statsSwitch.Checked;
+            profileStatus.ForeColor = WindowTheme.AccentLight;
+            profileStatus.Text = statsSwitch.Checked
+                ? "将显示实时 FPS 和网络往返，保存并重连后生效。"
+                : "将隐藏实时统计，保存并重连后生效。";
+        };
+        tooltips.SetToolTip(statsSwitch, "开启后标题栏显示实时 FPS 和网络往返；关闭后不显示。");
+        bar.Controls.Add(statsSwitch);
         return bar;
     }
 
