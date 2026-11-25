@@ -31,7 +31,7 @@ internal sealed class MirrorKeys : IDisposable
     [DllImport("user32.dll")]
     private static extern uint GetWindowThreadProcessId(IntPtr window, out uint process);
     [DllImport("user32.dll")]
-    private static extern void keybd_event(byte key, byte scan, uint flags, UIntPtr extra);
+    private static extern short GetAsyncKeyState(Keys key);
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode)]
     private static extern IntPtr GetModuleHandle(string name);
 
@@ -102,8 +102,9 @@ internal sealed class MirrorKeys : IDisposable
     private ContextMenuStrip CreateMenu()
     {
         var menu = new ContextMenuStrip();
-        menu.Items.Add("设备管理", null, delegate { settingsPage = 1; });
+        ((ToolStripMenuItem)menu.Items.Add("设备管理", null, delegate { settingsPage = 1; })).ShortcutKeyDisplayString = "左 Alt+D";
         menu.Items.Add("快捷键", null, delegate { settingsPage = 2; });
+        ((ToolStripMenuItem)menu.Items.Add("中文输入…", null, delegate { settingsPage = 4; })).ShortcutKeyDisplayString = "左 Alt+E";
         menu.Items.Add("连接设置", null, delegate { settingsPage = 3; });
         menu.Items.Add(new ToolStripSeparator());
         var rotate = new ToolStripMenuItem("旋转屏幕");
@@ -144,40 +145,29 @@ internal sealed class MirrorKeys : IDisposable
         bool up = message.ToInt64() == 0x101 || message.ToInt64() == 0x105;
         if (up && heldKeys.Remove(key)) return new IntPtr(1);
         if (up) return CallNextHookEx(hook, code, message, data);
+        if (heldKeys.Contains(key)) return new IntPtr(1);
+        if (key != (int)Keys.D && key != (int)Keys.E && key != (int)Keys.R)
+            return CallNextHookEx(hook, code, message, data);
 
         uint foregroundProcess;
         GetWindowThreadProcessId(GetForegroundWindow(), out foregroundProcess);
         if (foregroundProcess != (uint)mirror.Id)
             return CallNextHookEx(hook, code, message, data);
 
-        Keys modifiers = Control.ModifierKeys;
-        if (key == (int)Keys.F1 && modifiers == Keys.None)
-        {
-            if (!heldKeys.Add(key)) return new IntPtr(1);
-            settingsPage = 1;
-            return new IntPtr(1);
-        }
-        if (key == (int)Keys.R && modifiers == Keys.Control)
-        {
-            if (!heldKeys.Add(key)) return new IntPtr(1);
-            Task.Run(delegate { Rotate(); });
-            return new IntPtr(1);
-        }
-        if (key < (int)Keys.F2 || key > (int)Keys.F9 || modifiers != Keys.None)
+        if (GetAsyncKeyState(Keys.ShiftKey) < 0 || GetAsyncKeyState(Keys.LWin) < 0 ||
+            GetAsyncKeyState(Keys.RWin) < 0 || GetAsyncKeyState(Keys.RMenu) < 0)
             return CallNextHookEx(hook, code, message, data);
-        if (!heldKeys.Add(key)) return new IntPtr(1);
 
-        switch ((Keys)key)
-        {
-            case Keys.F2: SendShortcut((byte)'H', false); break;
-            case Keys.F3: SendShortcut((byte)'S', false); break;
-            case Keys.F4: SendShortcut((byte)'N', false); break;
-            case Keys.F5: SendShortcut((byte)'N', true); break;
-            case Keys.F6: SendShortcut((byte)'F', false); break;
-            case Keys.F7: SendShortcut((byte)'B', false); break;
-            case Keys.F8: SendShortcut((byte)'O', false); break;
-            case Keys.F9: SendShortcut((byte)'O', true); break;
-        }
+        bool leftAlt = GetAsyncKeyState(Keys.LMenu) < 0;
+        bool ctrl = GetAsyncKeyState(Keys.ControlKey) < 0;
+        if (leftAlt && !ctrl && (key == (int)Keys.D || key == (int)Keys.E))
+            settingsPage = key == (int)Keys.E ? 4 : 1;
+        else if (ctrl && !leftAlt && key == (int)Keys.R)
+            Task.Run(delegate { Rotate(); });
+        else
+            return CallNextHookEx(hook, code, message, data);
+
+        heldKeys.Add(key);
         return new IntPtr(1);
     }
 
@@ -193,18 +183,6 @@ internal sealed class MirrorKeys : IDisposable
     {
         try { WirelessMirror.AutoRotate(serial); }
         catch (Exception error) { AppLog.Warn("恢复自动旋转失败: " + error.Message); }
-    }
-
-    private static void SendShortcut(byte key, bool shift)
-    {
-        const byte leftAlt = 0xa4, leftShift = 0xa0;
-        const uint keyUp = 2;
-        keybd_event(leftAlt, 0, 0, UIntPtr.Zero);
-        if (shift) keybd_event(leftShift, 0, 0, UIntPtr.Zero);
-        keybd_event(key, 0, 0, UIntPtr.Zero);
-        keybd_event(key, 0, keyUp, UIntPtr.Zero);
-        if (shift) keybd_event(leftShift, 0, keyUp, UIntPtr.Zero);
-        keybd_event(leftAlt, 0, keyUp, UIntPtr.Zero);
     }
 
     public void Dispose()

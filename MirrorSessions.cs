@@ -207,6 +207,7 @@ internal sealed class MirrorSessions : IDisposable
                         center.RefreshStreamStatus(device);
                     }, delegate(int page)
                     {
+                        if (page == 3) { signal.ShowTextInput(mirror, session.Window, device.Name); return; }
                         if (page == 0) { ShowCenter(); return; }
                         using (var settings = new DeviceSettings(directory, new List<DeviceRecord>(), page, device, session.Profile))
                         {

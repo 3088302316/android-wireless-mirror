@@ -20,6 +20,19 @@ index 1c2021a..5c70b6a 100644
  endif
  
  check_functions = [
+diff --git a/app/src/cli.c b/app/src/cli.c
+index c751ec8..48039a3 100644
+--- a/app/src/cli.c
++++ b/app/src/cli.c
+@@ -1084,7 +1084,7 @@ static const struct sc_shortcut shortcuts[] = {
+         .text = "Quit",
+     },
+     {
+-        .shortcuts = { "MOD+f", "F11" },
++        .shortcuts = { "MOD+f" },
+         .text = "Switch fullscreen mode",
+     },
+     {
 diff --git a/app/src/control_msg.c b/app/src/control_msg.c
 index b75b6e7..d99fc32 100644
 --- a/app/src/control_msg.c
@@ -124,9 +137,77 @@ index 1daa42b..6b225a4 100644
          LOGI("%u fps (+%u frames skipped)", rendered_per_second,
                                              counter->nr_skipped);
 diff --git a/app/src/input_manager.c b/app/src/input_manager.c
-index af6ef90..9cae1ae 100644
+index af6ef90..327d581 100644
 --- a/app/src/input_manager.c
 +++ b/app/src/input_manager.c
+@@ -177,18 +177,11 @@ get_device_clipboard(struct sc_input_manager *im, enum sc_copy_key copy_key) {
+ }
+ 
+ static bool
+-set_device_clipboard(struct sc_input_manager *im, bool paste,
+-                     uint64_t sequence) {
++send_clipboard_text(struct sc_input_manager *im, const char *text, bool paste,
++                    uint64_t sequence) {
+     assert(im->controller && im->kp && !im->camera);
+ 
+-    char *text = SDL_GetClipboardText();
+-    if (!text) {
+-        LOGW("Could not get clipboard text: %s", SDL_GetError());
+-        return false;
+-    }
+-
+     char *text_dup = strdup(text);
+-    SDL_free(text);
+     if (!text_dup) {
+         LOGW("Could not strdup input text");
+         return false;
+@@ -209,6 +202,26 @@ set_device_clipboard(struct sc_input_manager *im, bool paste,
+     return true;
+ }
+ 
++static bool
++set_device_clipboard(struct sc_input_manager *im, bool paste,
++                     uint64_t sequence) {
++    char *text = SDL_GetClipboardText();
++    if (!text) {
++        LOGW("Could not get clipboard text: %s", SDL_GetError());
++        return false;
++    }
++    bool ok = send_clipboard_text(im, text, paste, sequence);
++    SDL_free(text);
++    return ok;
++}
++
++bool
++sc_input_manager_paste_text(struct sc_input_manager *im, const char *text) {
++    return im->controller && im->kp && !im->camera && !im->disconnected
++        && !im->screen->paused
++        && send_clipboard_text(im, text, true, SC_SEQUENCE_INVALID);
++}
++
+ static void
+ set_display_power(struct sc_input_manager *im, bool on) {
+     assert(im->controller && !im->camera);
+@@ -447,19 +460,6 @@ sc_input_manager_process_key(struct sc_input_manager *im,
+         }
+     }
+ 
+-    // Shortcuts that do not involve the MOD key
+-    switch (sdl_keycode) {
+-        case SDLK_F11:
+-            if (video && !repeat && down) {
+-                bool alt = mod & SDL_KMOD_ALT;
+-                bool super = mod & SDL_KMOD_GUI;
+-                if (!ctrl && !shift && !alt && !super) {
+-                    sc_screen_toggle_fullscreen(im->screen);
+-                }
+-            }
+-            return;
+-    }
+-
+     if (is_shortcut) {
+         enum sc_action action = down ? SC_ACTION_DOWN : SC_ACTION_UP;
+         switch (sdl_keycode) {
 @@ -1167,6 +1167,11 @@ void
  sc_input_manager_handle_event(struct sc_input_manager *im,
                                const SDL_Event *event) {
@@ -139,12 +220,51 @@ index af6ef90..9cae1ae 100644
          case SDL_EVENT_TEXT_INPUT:
              sc_input_manager_process_text_input(im, &event->text);
              break;
+diff --git a/app/src/input_manager.h b/app/src/input_manager.h
+index c986cbc..8ccc3b3 100644
+--- a/app/src/input_manager.h
++++ b/app/src/input_manager.h
+@@ -69,6 +69,9 @@ void
+ sc_input_manager_init(struct sc_input_manager *im,
+                       const struct sc_input_manager_params *params);
+ 
++bool
++sc_input_manager_paste_text(struct sc_input_manager *im, const char *text);
++
+ void
+ sc_input_manager_handle_event(struct sc_input_manager *im,
+                               const SDL_Event *event);
+diff --git a/app/src/screen.c b/app/src/screen.c
+index fec823e..3c080e4 100644
+--- a/app/src/screen.c
++++ b/app/src/screen.c
+@@ -10,6 +10,10 @@
+ #include "util/log.h"
+ #include "util/sdl.h"
+ 
++#ifdef _WIN32
++void sc_sdl_install_mirror_menu(SDL_Window *, struct sc_input_manager *);
++#endif
++
+ #define DISPLAY_MARGINS 96
+ 
+ #define DOWNCAST(SINK) container_of(SINK, struct sc_screen, frame_sink)
+@@ -706,6 +710,9 @@ sc_screen_init(struct sc_screen *screen,
+     };
+ 
+     sc_input_manager_init(&screen->im, &im_params);
++#ifdef _WIN32
++    sc_sdl_install_mirror_menu(screen->window, &screen->im);
++#endif
+ 
+     // Initialize even if not used for simplicity
+     sc_mouse_capture_init(&screen->mc, screen->window, params->shortcut_mods);
 diff --git a/app/src/sys/win/mirror_caption.c b/app/src/sys/win/mirror_caption.c
 new file mode 100644
-index 0000000..fa58be7
+index 0000000..97bac41
 --- /dev/null
 +++ b/app/src/sys/win/mirror_caption.c
-@@ -0,0 +1,383 @@
+@@ -0,0 +1,400 @@
 +/* Windows non-client caption integration for Android Wireless Mirror. */
 +#include <windows.h>
 +#include <windowsx.h>
@@ -152,12 +272,14 @@ index 0000000..fa58be7
 +#include <dwmapi.h>
 +#include <stdint.h>
 +#include <stdlib.h>
++#include <string.h>
 +#include <wchar.h>
 +
 +#include "util/sdl.h"
 +#include "events.h"
++#include "input_manager.h"
 +
-+void sc_sdl_install_mirror_menu(SDL_Window *window);
++void sc_sdl_install_mirror_menu(SDL_Window *, struct sc_input_manager *);
 +void sc_win_publish_mirror_fps(unsigned fps, unsigned skipped);
 +
 +#define MIRROR_MENU_MESSAGE (WM_APP + 0x28)
@@ -169,6 +291,7 @@ index 0000000..fa58be7
 +
 +struct mirror_caption_state {
 +    HWND receiver;
++    struct sc_input_manager *input;
 +    BOOL show_stats;
 +    unsigned fps, skipped;
 +    ULONGLONG fps_tick;
@@ -404,9 +527,10 @@ index 0000000..fa58be7
 +    if (!read_caption(window, &c)) return;
 +    HMENU menu = CreatePopupMenu();
 +    if (!menu) return;
-+    AppendMenuW(menu, MF_STRING, 1, L"设备管理");
++    AppendMenuW(menu, MF_STRING, 1, L"设备管理\t左 Alt+D");
 +    AppendMenuW(menu, MF_STRING, 2, L"快捷键");
 +    AppendMenuW(menu, MF_STRING, 3, L"连接设置");
++    AppendMenuW(menu, MF_STRING, 8, L"中文输入…\t左 Alt+E");
 +    AppendMenuW(menu, MF_STRING, 6, L"刷新画面\tAlt+Shift+R");
 +    AppendMenuW(menu, MF_SEPARATOR, 0, NULL);
 +    AppendMenuW(menu, MF_STRING, 4, L"断开并返回主菜单");
@@ -430,6 +554,8 @@ index 0000000..fa58be7
 +    if (!IsWindow(window)) return;
 +    if (selected == 4) {
 +        PostMessageW(window, WM_CLOSE, 0, 0);
++    } else if (selected == 8) {
++        PostMessageW(state->receiver, MIRROR_MENU_MESSAGE, 4, (LPARAM) window);
 +    } else if (selected == 6) {
 +        sc_push_event(SC_EVENT_REFRESH_VIDEO);
 +    } else if (selected == 5) {
@@ -445,6 +571,16 @@ index 0000000..fa58be7
 +             UINT_PTR id, DWORD_PTR data) {
 +    struct mirror_caption_state *state = (void *) data;
 +    switch (message) {
++        case WM_COPYDATA: {
++            const COPYDATASTRUCT *copy = (const COPYDATASTRUCT *) lparam;
++            if ((HWND) wparam != state->receiver || !copy
++                    || copy->dwData != 0x4d495458 || !copy->lpData
++                    || copy->cbData < 2 || copy->cbData > 65536) return FALSE;
++            const char *text = copy->lpData;
++            if (memchr(text, 0, copy->cbData) != text + copy->cbData - 1)
++                return FALSE;
++            return sc_input_manager_paste_text(state->input, text);
++        }
 +        case WM_CLOSE:
 +            PostMessageW(state->receiver, MIRROR_MENU_MESSAGE, 7, (LPARAM) window);
 +            break;
@@ -501,7 +637,7 @@ index 0000000..fa58be7
 +}
 +
 +void
-+sc_sdl_install_mirror_menu(SDL_Window *window) {
++sc_sdl_install_mirror_menu(SDL_Window *window, struct sc_input_manager *input) {
 +    WCHAR value[32];
 +    DWORD length = GetEnvironmentVariableW(L"ANDROID_MIRROR_MENU_WINDOW", value,
 +                                          sizeof(value) / sizeof(*value));
@@ -516,6 +652,7 @@ index 0000000..fa58be7
 +    struct mirror_caption_state *state = calloc(1, sizeof(*state));
 +    if (!state) return;
 +    state->receiver = receiver;
++    state->input = input;
 +    WCHAR enabled[2];
 +    state->show_stats = GetEnvironmentVariableW(L"ANDROID_MIRROR_STATS", enabled, 2) == 1
 +                     && enabled[0] == L'1';
@@ -528,28 +665,3 @@ index 0000000..fa58be7
 +        RedrawWindow(hwnd, NULL, NULL, RDW_INVALIDATE | RDW_FRAME);
 +    } else free(state);
 +}
-diff --git a/app/src/util/sdl.c b/app/src/util/sdl.c
-index 5bfcdad..e12630b 100644
---- a/app/src/util/sdl.c
-+++ b/app/src/util/sdl.c
-@@ -5,6 +5,10 @@
- 
- #include "util/log.h"
- 
-+#ifdef _WIN32
-+void sc_sdl_install_mirror_menu(SDL_Window *window);
-+#endif
-+
- SDL_Window *
- sc_sdl_create_window(const char *title, int64_t x, int64_t y, int64_t width,
-                      int64_t height, int64_t flags) {
-@@ -33,6 +37,9 @@ sc_sdl_create_window(const char *title, int64_t x, int64_t y, int64_t width,
-     }
- 
-     window = SDL_CreateWindowWithProperties(props);
-+#ifdef _WIN32
-+    if (window) sc_sdl_install_mirror_menu(window);
-+#endif
-     SDL_DestroyProperties(props);
-     return window;
- }

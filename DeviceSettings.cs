@@ -117,7 +117,7 @@ internal sealed class DeviceSettings : Form
         tooltips.SetToolTip(delete, "从设备历史中删除选中的设备；在线设备仍可能被重新扫描到");
         pairQr = ActionButton("扫码配对", PairWithQr, false, MirrorIcons.QrCode);
         pairCode = ActionButton("六位码配对", PairWithCode, false, MirrorIcons.Keyboard);
-        tooltips.SetToolTip(refresh, "刷新设备列表（F5）");
+        tooltips.SetToolTip(refresh, "刷新设备列表（Ctrl+R）");
         tooltips.SetToolTip(connect, "打开选中设备。按住 Ctrl 可选择多台。");
         tooltips.SetToolTip(lowLatency, StreamPresets.Game.Description);
         tooltips.SetToolTip(pairQr, "用手机扫描二维码完成无线调试配对");
@@ -223,7 +223,7 @@ internal sealed class DeviceSettings : Form
         var tipText = new Label
         {
             Dock = DockStyle.Fill,
-            Text = "手机准备\n1. 开启无线调试\n2. 与电脑同一 Wi-Fi\n\nF5  刷新设备\nCtrl+P  六位码配对",
+            Text = "手机准备\n1. 开启无线调试\n2. 与电脑同一 Wi-Fi\n\nCtrl+R  刷新设备\nCtrl+P  六位码配对",
             ForeColor = WindowTheme.Muted,
             Font = new Font("Microsoft YaHei UI", 8.7f),
             Padding = new Padding(13, 12, 10, 10),
@@ -687,9 +687,12 @@ internal sealed class DeviceSettings : Form
         list.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 190));
         list.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         string[,] keys = {
-            {"F2 / 鼠标中键", "回手机主页"}, {"F3", "最近任务"}, {"F4 / F5", "展开 / 收起通知栏"},
-            {"F6", "切换全屏"}, {"F7 / 鼠标右键", "返回"}, {"F8 / F9", "熄灭 / 点亮手机屏幕"},
-            {"F1", "打开设备管理"}, {"Ctrl+R / 托盘菜单", "旋转手机屏幕"}, {"左 Alt + ↑ / ↓", "调节手机音量"},
+            {"左 Alt + E", "输入中文"}, {"左 Alt + D", "打开设备管理"},
+            {"左 Alt + H / 鼠标中键", "回手机主页"}, {"左 Alt + S", "最近任务"},
+            {"左 Alt + B / 鼠标右键", "返回"}, {"左 Alt + F", "切换全屏"},
+            {"左 Alt + N", "展开通知栏"}, {"左 Alt + Shift + N", "收起通知栏"},
+            {"左 Alt + O", "熄灭手机屏幕"}, {"左 Alt + Shift + O", "点亮手机屏幕"},
+            {"Ctrl+R / 托盘菜单", "旋转手机屏幕"}, {"左 Alt + ↑ / ↓", "调节手机音量"},
             {"Ctrl + 左键拖动", "双指缩放"}, {"滚轮", "滚动页面"},
             {"左 Alt + Shift + R", "刷新当前投屏画面"}
         };
@@ -1452,7 +1455,7 @@ internal sealed class DeviceSettings : Form
 
     protected override bool ProcessCmdKey(ref Message message, Keys keyData)
     {
-        if (keyData == Keys.F5 && !scanning)
+        if (keyData == (Keys.Control | Keys.R) && !scanning)
         {
             RefreshFromButton();
             return true;
