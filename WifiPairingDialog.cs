@@ -20,6 +20,7 @@ internal sealed class WifiPairingDialog : Form
     private readonly CancellationTokenSource stop = new CancellationTokenSource();
     private readonly PictureBox qr = new PictureBox();
     private bool pairingFinished;
+    internal PairedPhone Paired { get; private set; }
 
     public WifiPairingDialog()
     {
@@ -88,7 +89,7 @@ internal sealed class WifiPairingDialog : Form
                         try { paired = WirelessMirror.Adb("pair " + endpoint, secret, 8000); }
                         catch (TimeoutException) { return "pair timeout"; }
                         AppLog.Info("二维码 adb pair: " + paired.Replace(secret, "<redacted>").Replace(password, "<redacted>"));
-                        if (paired.Contains("Successfully paired")) DiscoverPairedPhone(endpoint, token);
+                        if (paired.Contains("Successfully paired")) Paired = new PairedPhone(endpoint, paired);
                         return paired;
                     }
                     token.WaitHandle.WaitOne(600);
@@ -141,23 +142,6 @@ internal sealed class WifiPairingDialog : Form
                 Regex.IsMatch(endpoint, @"^[0-9a-fA-F.:%\[\]]+$"))
                 yield return new KeyValuePair<string, string>(fields[0].TrimEnd('.'), endpoint);
         }
-    }
-
-    private static void DiscoverPairedPhone(string pairingEndpoint, CancellationToken token)
-    {
-        var host = IPAddress.Parse(pairingEndpoint.Substring(0, pairingEndpoint.LastIndexOf(':')).Trim('[', ']'));
-        try
-        {
-            for (int attempt = 0; attempt < 5 && !token.WaitHandle.WaitOne(500); attempt++)
-            {
-                var candidate = Services(WirelessMirror.Adb("mdns services"), "_adb-tls-connect._tcp").FirstOrDefault(row =>
-                    IPAddress.Parse(row.Value.Substring(0, row.Value.LastIndexOf(':')).Trim('[', ']')).Equals(host));
-                if (candidate.Value == null || token.IsCancellationRequested) continue;
-                string connected = WirelessMirror.Adb("connect " + candidate.Value);
-                if (connected.Contains("connected to")) return;
-            }
-        }
-        catch (TimeoutException) { /* Pairing is already complete. The main screen also supports manual connection. */ }
     }
 
     private static Bitmap CreateQr(string payload)

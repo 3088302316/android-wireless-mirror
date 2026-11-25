@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 
 internal sealed class StreamPreset
 {
@@ -9,6 +9,12 @@ internal sealed class StreamPreset
     internal int Bitrate;
     internal int VideoBuffer;
     internal int AudioBuffer;
+
+    internal bool Matches(ConnectionProfile profile)
+    {
+        return profile.Size == Size && profile.Fps == Fps && profile.Bitrate == Bitrate &&
+            profile.VideoBuffer == VideoBuffer && profile.AudioBuffer == AudioBuffer;
+    }
 
     internal void Apply(ConnectionProfile profile)
     {
@@ -22,15 +28,19 @@ internal sealed class StreamPreset
 
 internal static class StreamPresets
 {
+    internal static readonly StreamPreset Balanced = new StreamPreset {
+        Name = "均衡", Description = "日常阅读、聊天和滚动列表，兼顾文字清晰度与操作响应",
+        Size = 1600, Fps = 60, Bitrate = 80, VideoBuffer = 0, AudioBuffer = 80 };
+    internal static readonly StreamPreset Game = new StreamPreset {
+        Name = "游戏低延迟", Description = "适合高刷手机和稳定 Wi-Fi，优先跟手并缩短声音缓冲",
+        Size = 1280, Fps = 90, Bitrate = 75, VideoBuffer = 0, AudioBuffer = 60 };
+
     internal static readonly StreamPreset[] All =
     {
-        new StreamPreset { Name = "均衡", Description = "清晰度和延迟平衡，适合日常使用",
-            Size = 1600, Fps = 60, Bitrate = 60, VideoBuffer = 40, AudioBuffer = 50 },
-        new StreamPreset { Name = "游戏低延迟", Description = "0ms 视频缓冲、90fps，优先操作响应",
-            Size = 1280, Fps = 90, Bitrate = 100, VideoBuffer = 0, AudioBuffer = 40 },
-        new StreamPreset { Name = "追剧稳定", Description = "较高缓冲，网络短时抖动时更耐看",
-            Size = 1920, Fps = 45, Bitrate = 80, VideoBuffer = 100, AudioBuffer = 100 },
-        new StreamPreset { Name = "弱网省流", Description = "降低帧率、码率和分辨率，优先不断流",
-            Size = 1280, Fps = 30, Bitrate = 35, VideoBuffer = 160, AudioBuffer = 150 }
+        Balanced, Game,
+        new StreamPreset { Name = "追剧稳定", Description = "字幕和运动画面优先，给 Wi-Fi 短时抖动留出缓冲",
+            Size = 1920, Fps = 60, Bitrate = 100, VideoBuffer = 80, AudioBuffer = 120 },
+        new StreamPreset { Name = "弱网省流", Description = "共享热点或带宽紧张时，降低传输量并保留操作响应",
+            Size = 1024, Fps = 30, Bitrate = 22, VideoBuffer = 60, AudioBuffer = 120 }
     };
 }

@@ -4,7 +4,7 @@ using System.Text;
 
 internal static class AdbClient
 {
-    internal static string Run(string arguments, string input = null, int timeoutMs = 6500)
+    internal static string Run(string arguments, string input = null, int timeoutMs = 6500, bool requireSuccess = false)
     {
         var start = new ProcessStartInfo(System.IO.Path.Combine(AppPaths.Root, "adb.exe"), arguments)
         {
@@ -40,7 +40,10 @@ internal static class AdbClient
                 if (detail.Length > 0) text = text.Length == 0 ? detail : text + "\n" + detail;
                 text = text.Trim();
                 if (process.ExitCode != 0)
+                {
+                    if (requireSuccess) throw new System.IO.IOException("ADB 命令执行失败：" + Short(text));
                     AppLog.Warn("adb exit " + process.ExitCode + ": " + Sanitize(arguments) + " -> " + Short(text));
+                }
                 else if (timer.ElapsedMilliseconds > 2500)
                     AppLog.Warn("adb slow " + timer.ElapsedMilliseconds + "ms: " + Sanitize(arguments));
                 return text;

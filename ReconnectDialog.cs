@@ -67,7 +67,29 @@ internal sealed class ReconnectDialog : Form
                     {
                         progress.Report("第 " + (attempt + 1) + " / " + delays.Length + " 次：正在查找设备…");
                         if (attempt == 0 || attempt % 2 == 1) TryReconnectTransport(priorSerial);
-                        var same = directory.Scan().FirstOrDefault(row => row.Id == device.Id && row.Online);
+                        if (token.IsCancellationRequested) break;
+                        // The old endpoint may now belong to a different phone.
+                        if (DeviceDirectory.IsWirelessSerial(priorSerial))
+                        {
+                            try
+                            {
+                                if (DeviceDirectory.ReadId(priorSerial) == device.Id && !token.IsCancellationRequested)
+                                    return device;
+                            }
+                            catch (System.IO.IOException) { /* Offline or port changed. Try discovery. */ }
+                            catch (TimeoutException) { /* Try discovery on the other transports. */ }
+                        }
+                        if (token.IsCancellationRequested) break;
+                        DeviceRecord same = null;
+                        try
+                        {
+                            // Discovery also finds the device when its wireless port has changed.
+                            same = directory.Scan().FirstOrDefault(row => row.Id == device.Id && row.Online);
+                        }
+                        catch (TimeoutException error)
+                        {
+                            AppLog.Warn("本次设备扫描超时，继续重连: " + error.Message);
+                        }
                         if (same != null && !token.IsCancellationRequested)
                         {
                             progress.Report("已找到设备，正在恢复投屏…");
@@ -107,15 +129,15 @@ internal sealed class ReconnectDialog : Form
         if (!DeviceDirectory.IsWirelessSerial(priorSerial)) return;
         const string suffix = "._adb-tls-connect._tcp";
         string address = priorSerial;
-        if (priorSerial.EndsWith(suffix, StringComparison.Ordinal))
-        {
-            string name = priorSerial.Substring(0, priorSerial.Length - suffix.Length);
-            address = WifiPairingDialog.Services(WirelessMirror.Adb("mdns services"), "_adb-tls-connect._tcp")
-                .FirstOrDefault(row => row.Key == name).Value;
-        }
-        if (String.IsNullOrEmpty(address)) return;
         try
         {
+            if (priorSerial.EndsWith(suffix, StringComparison.Ordinal))
+            {
+                string name = priorSerial.Substring(0, priorSerial.Length - suffix.Length);
+                address = WifiPairingDialog.Services(WirelessMirror.Adb("mdns services"), "_adb-tls-connect._tcp")
+                    .FirstOrDefault(row => row.Key == name).Value;
+            }
+            if (String.IsNullOrEmpty(address)) return;
             string result = WirelessMirror.Adb("connect " + address, null, 5000);
             AppLog.Info("重连传输: " + address + " / " + result.Replace("\n", " "));
         }

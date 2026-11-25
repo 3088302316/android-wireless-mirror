@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Globalization;
 using System.IO;
 using System.Runtime.Serialization;
@@ -15,11 +15,11 @@ internal enum AudioRoute
 [DataContract]
 internal sealed class ConnectionProfile
 {
-    [DataMember] public int Size = 1600;
-    [DataMember] public int Fps = 60;
-    [DataMember] public int Bitrate = 60;
-    [DataMember] public int VideoBuffer = 0;
-    [DataMember] public int AudioBuffer = 50;
+    [DataMember] public int Size;
+    [DataMember] public int Fps;
+    [DataMember] public int Bitrate;
+    [DataMember] public int VideoBuffer;
+    [DataMember] public int AudioBuffer;
     [DataMember] public bool AutoReconnect = true;
     [DataMember] public AudioRoute Audio = AudioRoute.Pc;
     [DataMember] public bool ShowStats;
@@ -27,13 +27,16 @@ internal sealed class ConnectionProfile
 
     private static readonly DataContractJsonSerializer Serializer = new DataContractJsonSerializer(typeof(ConnectionProfile));
 
+    public ConnectionProfile() { StreamPresets.Balanced.Apply(this); }
+
     public string Options
     {
         get
         {
+            int audioBuffer = Math.Max(60, AudioBuffer);
             string options = String.Format(CultureInfo.InvariantCulture,
-                "--max-size={0} --max-fps={1} --video-bit-rate={2} --video-buffer={3} --audio-buffer={4}",
-                Size, Fps, Bitrate * 100000, VideoBuffer, AudioBuffer);
+                "--max-size={0} --max-fps={1} --video-bit-rate={2} --video-buffer={3} --audio-buffer={4} --audio-output-buffer=50",
+                Size, Fps, Bitrate * 100000, VideoBuffer, audioBuffer);
             switch (Audio)
             {
                 case AudioRoute.Phone:
@@ -80,7 +83,7 @@ internal sealed class ConnectionProfile
             if (!File.Exists(oldPath)) return profile;
             switch (File.ReadAllText(oldPath).Trim())
             {
-                case "low-latency": profile.Size = 1280; profile.Bitrate = 40; profile.AudioBuffer = 40; break;
+                case "low-latency": profile.Size = 1280; profile.Bitrate = 40; profile.AudioBuffer = 80; break;
                 case "weak-wifi": profile.Size = 1280; profile.Fps = 30; profile.Bitrate = 30; profile.VideoBuffer = 80; profile.AudioBuffer = 120; break;
                 case "sharp": profile.Size = 2160; profile.Bitrate = 100; break;
             }
@@ -144,6 +147,7 @@ internal sealed class ConnectionProfile
         if (Size < 480 || Size > 3840 || Fps < 15 || Fps > 120 || Bitrate < 5 || Bitrate > 300 ||
             VideoBuffer < 0 || VideoBuffer > 250 || AudioBuffer < 20 || AudioBuffer > 250)
             throw new InvalidDataException("连接设置有超出范围的数值。请检查 connection-settings.json。");
+        if (AudioBuffer < 60) AudioBuffer = 60;
         if (Audio < AudioRoute.Pc || Audio > AudioRoute.None) Audio = AudioRoute.Pc;
     }
 }

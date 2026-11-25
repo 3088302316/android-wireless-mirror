@@ -20,6 +20,85 @@ index 1c2021a..5c70b6a 100644
  endif
  
  check_functions = [
+diff --git a/app/src/control_msg.c b/app/src/control_msg.c
+index b75b6e7..d99fc32 100644
+--- a/app/src/control_msg.c
++++ b/app/src/control_msg.c
+@@ -357,6 +357,16 @@ sc_control_msg_log(const struct sc_control_msg *msg) {
+ 
+ bool
+ sc_control_msg_is_droppable(const struct sc_control_msg *msg) {
++    if (msg->type == SC_CONTROL_MSG_TYPE_INJECT_TOUCH_EVENT) {
++        enum android_motionevent_action action = msg->inject_touch_event.action;
++        return action == AMOTION_EVENT_ACTION_MOVE
++            || action == AMOTION_EVENT_ACTION_HOVER_MOVE;
++    }
++    if (msg->type == SC_CONTROL_MSG_TYPE_INJECT_KEYCODE) {
++        return msg->inject_keycode.repeat > 0
++            && msg->inject_keycode.action == AKEY_EVENT_ACTION_DOWN;
++    }
++    if (msg->type == SC_CONTROL_MSG_TYPE_BACK_OR_SCREEN_ON) return false;
+     // Cannot drop UHID_CREATE messages, because it would cause all further
+     // UHID_INPUT messages for this device to be invalid.
+     // Cannot drop UHID_DESTROY messages either, because a further UHID_CREATE
+diff --git a/app/src/controller.c b/app/src/controller.c
+index 19e2acb..ccb3d0f 100644
+--- a/app/src/controller.c
++++ b/app/src/controller.c
+@@ -92,6 +92,23 @@ sc_controller_destroy(struct sc_controller *controller) {
+     sc_receiver_destroy(&controller->receiver);
+ }
+ 
++static bool
++motion_replaces(const struct sc_control_msg *latest,
++                const struct sc_control_msg *pending) {
++    if (pending->type != SC_CONTROL_MSG_TYPE_INJECT_TOUCH_EVENT) return false;
++    enum android_motionevent_action action = latest->inject_touch_event.action;
++    if (action != AMOTION_EVENT_ACTION_MOVE
++            && action != AMOTION_EVENT_ACTION_HOVER_MOVE) return false;
++    return pending->inject_touch_event.action == action
++        && latest->inject_touch_event.pointer_id == pending->inject_touch_event.pointer_id
++        && latest->inject_touch_event.buttons == pending->inject_touch_event.buttons
++        && latest->inject_touch_event.pressure == pending->inject_touch_event.pressure
++        && latest->inject_touch_event.position.screen_size.width
++            == pending->inject_touch_event.position.screen_size.width
++        && latest->inject_touch_event.position.screen_size.height
++            == pending->inject_touch_event.position.screen_size.height;
++}
++
+ bool
+ sc_controller_push_msg(struct sc_controller *controller,
+                        const struct sc_control_msg *msg) {
+@@ -102,6 +119,17 @@ sc_controller_push_msg(struct sc_controller *controller,
+ 
+     sc_mutex_lock(&controller->mutex);
+     size_t size = sc_vecdeque_size(&controller->queue);
++    // Keep ordinary sampling intact. When the sender is behind, refresh the
++    // last unsent position without crossing a click, key, or second pointer.
++    if (size >= 3 && msg->type == SC_CONTROL_MSG_TYPE_INJECT_TOUCH_EVENT) {
++        size_t tail = (controller->queue.origin + size - 1) % controller->queue.cap;
++        struct sc_control_msg *last = &controller->queue.data[tail];
++        if (motion_replaces(msg, last)) {
++            *last = *msg;
++            sc_mutex_unlock(&controller->mutex);
++            return true;
++        }
++    }
+     if (size < SC_CONTROL_MSG_QUEUE_LIMIT) {
+         bool was_empty = sc_vecdeque_is_empty(&controller->queue);
+         sc_vecdeque_push_noresize(&controller->queue, *msg);
+diff --git a/app/src/events.h b/app/src/events.h
+index 9f42e29..7f59a12 100644
+--- a/app/src/events.h
++++ b/app/src/events.h
+@@ -22,6 +22,7 @@ enum {
+     SC_EVENT_AOA_OPEN_ERROR,
+     SC_EVENT_DISCONNECTED_ICON_LOADED,
+     SC_EVENT_DISCONNECTED_TIMEOUT,
++    SC_EVENT_REFRESH_VIDEO,
+ };
+ 
+ bool
 diff --git a/app/src/fps_counter.c b/app/src/fps_counter.c
 index 1daa42b..6b225a4 100644
 --- a/app/src/fps_counter.c
@@ -44,37 +123,28 @@ index 1daa42b..6b225a4 100644
      if (counter->nr_skipped) {
          LOGI("%u fps (+%u frames skipped)", rendered_per_second,
                                              counter->nr_skipped);
-diff --git a/app/src/util/sdl.c b/app/src/util/sdl.c
-index 5bfcdad..e12630b 100644
---- a/app/src/util/sdl.c
-+++ b/app/src/util/sdl.c
-@@ -5,6 +5,10 @@
- 
- #include "util/log.h"
- 
-+#ifdef _WIN32
-+void sc_sdl_install_mirror_menu(SDL_Window *window);
-+#endif
-+
- SDL_Window *
- sc_sdl_create_window(const char *title, int64_t x, int64_t y, int64_t width,
-                      int64_t height, int64_t flags) {
-@@ -33,6 +37,9 @@ sc_sdl_create_window(const char *title, int64_t x, int64_t y, int64_t width,
-     }
- 
-     window = SDL_CreateWindowWithProperties(props);
-+#ifdef _WIN32
-+    if (window) sc_sdl_install_mirror_menu(window);
-+#endif
-     SDL_DestroyProperties(props);
-     return window;
- }
+diff --git a/app/src/input_manager.c b/app/src/input_manager.c
+index af6ef90..9cae1ae 100644
+--- a/app/src/input_manager.c
++++ b/app/src/input_manager.c
+@@ -1167,6 +1167,11 @@ void
+ sc_input_manager_handle_event(struct sc_input_manager *im,
+                               const SDL_Event *event) {
+     switch (event->type) {
++        case SC_EVENT_REFRESH_VIDEO:
++            if (im->controller && !im->disconnected && !im->screen->paused) {
++                reset_video(im);
++            }
++            break;
+         case SDL_EVENT_TEXT_INPUT:
+             sc_input_manager_process_text_input(im, &event->text);
+             break;
 diff --git a/app/src/sys/win/mirror_caption.c b/app/src/sys/win/mirror_caption.c
 new file mode 100644
-index 0000000..487f074
+index 0000000..fa58be7
 --- /dev/null
 +++ b/app/src/sys/win/mirror_caption.c
-@@ -0,0 +1,374 @@
+@@ -0,0 +1,383 @@
 +/* Windows non-client caption integration for Android Wireless Mirror. */
 +#include <windows.h>
 +#include <windowsx.h>
@@ -85,6 +155,7 @@ index 0000000..487f074
 +#include <wchar.h>
 +
 +#include "util/sdl.h"
++#include "events.h"
 +
 +void sc_sdl_install_mirror_menu(SDL_Window *window);
 +void sc_win_publish_mirror_fps(unsigned fps, unsigned skipped);
@@ -336,6 +407,7 @@ index 0000000..487f074
 +    AppendMenuW(menu, MF_STRING, 1, L"设备管理");
 +    AppendMenuW(menu, MF_STRING, 2, L"快捷键");
 +    AppendMenuW(menu, MF_STRING, 3, L"连接设置");
++    AppendMenuW(menu, MF_STRING, 6, L"刷新画面\tAlt+Shift+R");
 +    AppendMenuW(menu, MF_SEPARATOR, 0, NULL);
 +    AppendMenuW(menu, MF_STRING, 4, L"断开并返回主菜单");
 +    AppendMenuW(menu, MF_SEPARATOR, 0, NULL);
@@ -358,6 +430,8 @@ index 0000000..487f074
 +    if (!IsWindow(window)) return;
 +    if (selected == 4) {
 +        PostMessageW(window, WM_CLOSE, 0, 0);
++    } else if (selected == 6) {
++        sc_push_event(SC_EVENT_REFRESH_VIDEO);
 +    } else if (selected == 5) {
 +        state->show_stats = !state->show_stats;
 +    } else if (selected >= 1 && selected <= 3) {
@@ -371,6 +445,9 @@ index 0000000..487f074
 +             UINT_PTR id, DWORD_PTR data) {
 +    struct mirror_caption_state *state = (void *) data;
 +    switch (message) {
++        case WM_CLOSE:
++            PostMessageW(state->receiver, MIRROR_MENU_MESSAGE, 7, (LPARAM) window);
++            break;
 +        case MIRROR_FPS_MESSAGE:
 +            state->fps = (unsigned) wparam;
 +            state->skipped = (unsigned) lparam;
@@ -439,7 +516,9 @@ index 0000000..487f074
 +    struct mirror_caption_state *state = calloc(1, sizeof(*state));
 +    if (!state) return;
 +    state->receiver = receiver;
-+    state->show_stats = FALSE;
++    WCHAR enabled[2];
++    state->show_stats = GetEnvironmentVariableW(L"ANDROID_MIRROR_STATS", enabled, 2) == 1
++                     && enabled[0] == L'1';
 +    state->rtt = -1;
 +    if (SetWindowSubclass(hwnd, caption_proc, MIRROR_MENU_SUBCLASS, (DWORD_PTR) state)) {
 +        InterlockedExchangePointer(&stats_window, hwnd);
@@ -449,3 +528,28 @@ index 0000000..487f074
 +        RedrawWindow(hwnd, NULL, NULL, RDW_INVALIDATE | RDW_FRAME);
 +    } else free(state);
 +}
+diff --git a/app/src/util/sdl.c b/app/src/util/sdl.c
+index 5bfcdad..e12630b 100644
+--- a/app/src/util/sdl.c
++++ b/app/src/util/sdl.c
+@@ -5,6 +5,10 @@
+ 
+ #include "util/log.h"
+ 
++#ifdef _WIN32
++void sc_sdl_install_mirror_menu(SDL_Window *window);
++#endif
++
+ SDL_Window *
+ sc_sdl_create_window(const char *title, int64_t x, int64_t y, int64_t width,
+                      int64_t height, int64_t flags) {
+@@ -33,6 +37,9 @@ sc_sdl_create_window(const char *title, int64_t x, int64_t y, int64_t width,
+     }
+ 
+     window = SDL_CreateWindowWithProperties(props);
++#ifdef _WIN32
++    if (window) sc_sdl_install_mirror_menu(window);
++#endif
+     SDL_DestroyProperties(props);
+     return window;
+ }

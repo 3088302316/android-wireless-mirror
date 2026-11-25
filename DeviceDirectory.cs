@@ -66,7 +66,26 @@ internal sealed class DeviceDirectory
         }).ToList();
     }
 
+    internal static List<string> WirelessTransports()
+    {
+        var online = new List<string>();
+        foreach (string line in AdbClient.Run("devices", null, 3000, true).Split('\n'))
+        {
+            var fields = Regex.Split(line.Trim(), @"\s+");
+            if (fields.Length >= 2 && fields[1] == "device" && IsWirelessSerial(fields[0]))
+                online.Add(fields[0]);
+        }
+        online.Sort(StringComparer.Ordinal);
+        return online;
+    }
+
     public List<DeviceRecord> Scan()
+    {
+        string ignored;
+        return Scan(out ignored);
+    }
+
+    public List<DeviceRecord> Scan(out string transports)
     {
         List<DeviceRecord> rows;
         lock (gate)
@@ -74,13 +93,8 @@ internal sealed class DeviceDirectory
             rows = CopySavedLocked();
         }
 
-        var online = new List<string>();
-        foreach (string line in WirelessMirror.Adb("devices -l").Split('\n'))
-        {
-            var fields = Regex.Split(line.Trim(), @"\s+");
-            if (fields.Length >= 2 && fields[1] == "device" && IsWirelessSerial(fields[0]))
-                online.Add(fields[0]);
-        }
+        var online = WirelessTransports();
+        transports = String.Join("\n", online);
         var onlineSet = new HashSet<string>(online, StringComparer.Ordinal);
         Dictionary<string, List<string>> mdns = null;
         // Process direct IP transports first so an mDNS peer does not pull us onto a VPN/tunnel address.
@@ -321,7 +335,7 @@ internal sealed class DeviceDirectory
         string value = Property(serial, "ro.serialno");
         if (String.IsNullOrWhiteSpace(value) || value == "unknown" || value == "0123456789ABCDEF")
         {
-            value = WirelessMirror.Adb("-s " + serial + " shell settings get secure android_id");
+            value = AdbClient.Run("-s " + serial + " shell settings get secure android_id", null, 3500, true);
             if (!Regex.IsMatch(value, @"^[a-fA-F0-9]{16}$")) return null;
             value = "android-id:" + value;
         }
@@ -331,7 +345,7 @@ internal sealed class DeviceDirectory
 
     private static string Property(string serial, string name)
     {
-        return WirelessMirror.Adb("-s " + serial + " shell getprop " + name);
+        return AdbClient.Run("-s " + serial + " shell getprop " + name, null, 3500, true);
     }
 
     public void Rename(DeviceRecord record, string alias)
@@ -356,6 +370,18 @@ internal sealed class DeviceDirectory
             if (current == null) return;
             saved.Remove(current);
             SaveLocked();
+        }
+    }
+
+    internal void RememberPaired(DeviceRecord record)
+    {
+        if (record.Id == null || !record.Online) throw new InvalidOperationException("尚未确认设备身份。");
+        lock (gate)
+        {
+            if (saved.Any(item => item.Id == record.Id)) return;
+            var added = GetSaved(record);
+            try { SaveLocked(); }
+            catch { saved.Remove(added); throw; }
         }
     }
 

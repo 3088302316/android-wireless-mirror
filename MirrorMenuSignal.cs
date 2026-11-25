@@ -6,6 +6,7 @@ internal sealed class MirrorMenuSignal : NativeWindow, IDisposable
     private const int MenuMessage = 0x8028; // WM_APP + 0x28
     private IntPtr sender;
     private int page;
+    public bool CloseRequested { get; private set; }
 
     public MirrorMenuSignal()
     {
@@ -23,6 +24,11 @@ internal sealed class MirrorMenuSignal : NativeWindow, IDisposable
     protected override void WndProc(ref Message message)
     {
         long command = message.WParam.ToInt64();
+        if (message.Msg == MenuMessage && command == 7)
+        {
+            CloseRequested = true;
+            return;
+        }
         if (message.Msg == MenuMessage && command >= 1 && command <= 3)
         {
             sender = message.LParam;

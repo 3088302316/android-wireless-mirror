@@ -100,35 +100,43 @@ internal static class WirelessMirror
         }
     }
 
-    internal static Process StartMirror(DeviceRecord device, ConnectionProfile profile, MirrorMenuSignal menuSignal)
+    internal static Process StartMirror(DeviceRecord device, ConnectionProfile profile, MirrorMenuSignal menuSignal, bool locked, bool softwareDecoding)
     {
-        bool locked = IsLocked(device.Serial);
         // If the phone is locked, keep its screen on so the user can unlock it
         // on the phone. The secure keyguard itself still cannot be captured.
         string options = "--serial=" + device.Serial + (locked ? " " : " --turn-screen-off ") +
-            "--window-height=800 --video-codec=h264 --hwdec=auto " +
+            "--window-height=800 --video-codec=h264 --hwdec=" + (softwareDecoding ? "disabled " : "auto ") +
             profile.Options + " --window-title=\"" + Caption(device) + "\"";
         string executable = profile.ShowStats ? "scrcpy-stats.exe" : "scrcpy.exe";
         AppLog.Info("开始投屏: " + device.Name + " / " + device.Serial + " / " +
-            (locked ? "锁屏" : "已解锁") + " / " + executable + " / " + profile.Options);
+            (locked ? "锁屏" : "已解锁") + " / " + executable + " / " + options);
         var start = StartInfo(executable, options);
         start.RedirectStandardError = true;
         start.StandardErrorEncoding = Encoding.UTF8;
+        start.RedirectStandardOutput = true;
+        start.StandardOutputEncoding = Encoding.UTF8;
+        start.EnvironmentVariables["ANDROID_MIRROR_STATS"] = profile.ShowStats ? "1" : "0";
         start.EnvironmentVariables["ANDROID_MIRROR_MENU_WINDOW"] =
             menuSignal.Handle.ToInt64().ToString(System.Globalization.CultureInfo.InvariantCulture);
         var process = Process.Start(start);
         if (process == null) throw new InvalidOperationException("scrcpy.exe 没有返回进程。");
         try { process.PriorityClass = ProcessPriorityClass.AboveNormal; }
         catch (Exception error) { AppLog.Warn("设置 scrcpy 优先级失败: " + error.Message); }
-        process.ErrorDataReceived += delegate(object sender, DataReceivedEventArgs args)
+        DataReceivedEventHandler log = delegate(object sender, DataReceivedEventArgs args)
         {
             if (String.IsNullOrEmpty(args.Data)) return;
             if (args.Data.IndexOf("ERROR", StringComparison.OrdinalIgnoreCase) >= 0 ||
                 args.Data.IndexOf("WARN", StringComparison.OrdinalIgnoreCase) >= 0 ||
                 args.Data.IndexOf("fail", StringComparison.OrdinalIgnoreCase) >= 0)
                 AppLog.Warn("scrcpy: " + args.Data);
+            else if (args.Data.IndexOf("Video decoding:", StringComparison.Ordinal) >= 0 ||
+                     args.Data.IndexOf("Texture", StringComparison.Ordinal) >= 0)
+                AppLog.Info("scrcpy " + device.Name + ": " + args.Data);
         };
+        process.ErrorDataReceived += log;
+        process.OutputDataReceived += log;
         process.BeginErrorReadLine();
+        process.BeginOutputReadLine();
         return process;
     }
 
@@ -207,13 +215,13 @@ internal static class WirelessMirror
         return AdbClient.Run(arguments, input, timeoutMs);
     }
 
-    private static void PairAddress(string address, string code)
+    private static PairedPhone PairAddress(string address, string code)
     {
         string result = Adb("pair " + address, code, 8000);
         if (result.IndexOf("Successfully paired", StringComparison.OrdinalIgnoreCase) >= 0)
         {
             AppLog.Info("六位码配对成功: " + address);
-            return;
+            return new PairedPhone(address, result);
         }
         AppLog.Warn("六位码配对失败: " + address + " / " + Short(result));
         string detail = Short(result);
@@ -229,9 +237,10 @@ internal static class WirelessMirror
         return text.Length > 180 ? text.Substring(0, 180) + "…" : text;
     }
 
-    public static bool PairNew(IWin32Window owner)
+    public static PairedPhone PairNew(IWin32Window owner)
     {
-        using (var dialog = new AddressInputDialog(PairAddress))
-            return dialog.ShowDialog(owner) == DialogResult.OK;
+        PairedPhone paired = null;
+        using (var dialog = new AddressInputDialog(delegate(string address, string code) { paired = PairAddress(address, code); }))
+            return dialog.ShowDialog(owner) == DialogResult.OK ? paired : null;
     }
 }

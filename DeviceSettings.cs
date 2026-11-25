@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Drawing;
@@ -35,6 +35,7 @@ internal sealed class DeviceSettings : Form
     private readonly Label profileStatus = new Label();
     private readonly AppButton applyProfile, probeButton, networkButton, logButton;
     private readonly ConnectionProfile draft;
+    private readonly Dictionary<StreamPreset, AppButton> presetButtons = new Dictionary<StreamPreset, AppButton>();
     private AntdUI.Slider sizeSlider, fpsSlider, bitrateSlider, videoBufferSlider, audioBufferSlider;
     private Label sizeReading, fpsReading, bitrateReading, videoBufferReading, audioBufferReading;
     private AppButton audioButton, settingsAudioButton;
@@ -49,7 +50,12 @@ internal sealed class DeviceSettings : Form
     private readonly Bitmap appIcon;
     private string summary = "";
     private int hoverIndex = -1;
+    private readonly Timer discovery = new Timer { Interval = 3000 };
+    private bool checkingTransports;
+    private string knownTransports;
     private bool scanning;
+    private DeviceRecord pendingPairedDevice;
+    private bool fillingDevices;
     private bool loaded;
     public event Action<DeviceRecord> OpenRequested;
     public event Action<DeviceRecord> RenameApplied;
@@ -59,11 +65,6 @@ internal sealed class DeviceSettings : Form
 
     [DllImport("user32.dll")]
     private static extern bool SetForegroundWindow(IntPtr window);
-
-    [DllImport("user32.dll")]
-    private static extern IntPtr SendMessage(IntPtr window, uint message, IntPtr wParam, IntPtr lParam);
-
-    private const uint WM_SETREDRAW = 0x000B;
 
     public DeviceSettings(DeviceDirectory directory, List<DeviceRecord> rows, int page, DeviceRecord active = null, ConnectionProfile profile = null)
     {
@@ -118,7 +119,7 @@ internal sealed class DeviceSettings : Form
         pairCode = ActionButton("六位码配对", PairWithCode, false, MirrorIcons.Keyboard);
         tooltips.SetToolTip(refresh, "刷新设备列表（F5）");
         tooltips.SetToolTip(connect, "打开选中设备。按住 Ctrl 可选择多台。");
-        tooltips.SetToolTip(lowLatency, "套用 0ms 视频缓冲和 90fps；鼠标保持普通桌面指针，不会被窗口捕获");
+        tooltips.SetToolTip(lowLatency, StreamPresets.Game.Description);
         tooltips.SetToolTip(pairQr, "用手机扫描二维码完成无线调试配对");
         tooltips.SetToolTip(pairCode, "输入手机配对弹窗里的地址和六位码");
 
@@ -137,23 +138,12 @@ internal sealed class DeviceSettings : Form
         Fill(rows);
         ShowPage(Math.Max(0, Math.Min(page, pages.Length - 1)));
         DoubleBufferTree(this);
-        ResizeBegin += delegate
-        {
-            if (IsHandleCreated) SendMessage(Handle, WM_SETREDRAW, IntPtr.Zero, IntPtr.Zero);
-        };
-        ResizeEnd += delegate
-        {
-            if (!IsHandleCreated) return;
-            SendMessage(Handle, WM_SETREDRAW, new IntPtr(1), IntPtr.Zero);
-            Invalidate(true);
-            Update();
-        };
-
         statusTimer.Tick += delegate
         {
             statusTimer.Stop();
             if (!scanning) SetStatusText(summary, WindowTheme.Muted);
         };
+        discovery.Tick += async delegate { await DetectDeviceChanges(); };
         Shown += async delegate
         {
             BeginInvoke((MethodInvoker)delegate
@@ -166,7 +156,11 @@ internal sealed class DeviceSettings : Form
             if (loaded) return;
             loaded = true;
             await RefreshDevicesAsync();
-            devices.Focus();
+            if (!IsDisposed && active == null)
+            {
+                discovery.Start();
+                if (currentPage == 0 && ContainsFocus) devices.Focus();
+            }
         };
     }
 
@@ -414,27 +408,6 @@ internal sealed class DeviceSettings : Form
         }
     }
 
-    protected override void WndProc(ref Message message)
-    {
-        const int WM_SYSCOMMAND = 0x0112;
-        const int SC_MAXIMIZE = 0xF030;
-        const int SC_RESTORE = 0xF120;
-        int command = message.Msg == WM_SYSCOMMAND ? message.WParam.ToInt32() & 0xFFF0 : 0;
-        if (command == SC_MAXIMIZE || command == SC_RESTORE)
-        {
-            if (IsHandleCreated) SendMessage(Handle, WM_SETREDRAW, IntPtr.Zero, IntPtr.Zero);
-            base.WndProc(ref message);
-            if (IsHandleCreated)
-            {
-                SendMessage(Handle, WM_SETREDRAW, new IntPtr(1), IntPtr.Zero);
-                Invalidate(true);
-                Update();
-            }
-            return;
-        }
-        base.WndProc(ref message);
-    }
-
     private Panel DevicePage()
     {
         DoubleBuffer(devices);
@@ -447,7 +420,7 @@ internal sealed class DeviceSettings : Form
         devices.BackColor = WindowTheme.Canvas;
         devices.ForeColor = WindowTheme.Ink;
         devices.DrawItem += DrawDevice;
-        devices.SelectedIndexChanged += delegate { UpdateButtons(); };
+        devices.SelectedIndexChanged += delegate { if (!fillingDevices) UpdateButtons(); };
         devices.MouseDoubleClick += delegate(object sender, MouseEventArgs e)
         {
             int index = devices.IndexFromPoint(e.Location);
@@ -614,26 +587,31 @@ internal sealed class DeviceSettings : Form
 
     private void PairWithQr()
     {
-        var result = DialogResult.Cancel;
+        PairedPhone phone;
         using (var dialog = new WifiPairingDialog())
-            result = dialog.ShowDialog(this);
-        if (result == DialogResult.Retry)
         {
-            if (WirelessMirror.PairNew(this)) RefreshAfterChange("配对成功。设备出现在列表后，选中并打开投屏。");
+            var result = dialog.ShowDialog(this);
+            if (result == DialogResult.Retry) { PairWithCode(); return; }
+            if (result != DialogResult.OK) return;
+            phone = dialog.Paired;
         }
-        else if (result == DialogResult.OK)
-            RefreshAfterChange("扫码配对成功。设备出现在列表后，选中并打开投屏。");
+        FinishPairing(phone);
     }
 
     private void PairWithCode()
     {
-        if (WirelessMirror.PairNew(this))
-            RefreshAfterChange("配对成功。设备出现在列表后，选中并打开投屏。");
+        FinishPairing(WirelessMirror.PairNew(this));
     }
 
-    private async void RefreshAfterChange(string message)
+    private async void FinishPairing(PairedPhone phone)
     {
-        await RefreshDevicesAsync(message);
+        if (phone == null) return;
+        using (var dialog = new PairedPhoneDialog(phone, directory))
+        {
+            if (dialog.ShowDialog(this) == DialogResult.OK)
+                await RefreshDevicesAsync(dialog.Added);
+            else SetNotice("配对已完成，设备尚未添加。", WindowTheme.Amber);
+        }
     }
 
     private async void RefreshFromButton()
@@ -705,14 +683,15 @@ internal sealed class DeviceSettings : Form
     private Panel KeyPage()
     {
         var host = new Panel { Dock = DockStyle.Fill, BackColor = WindowTheme.Surface, Padding = new Padding(18, 12, 10, 10), AutoScroll = true };
-        var list = new TableLayoutPanel { Dock = DockStyle.Top, AutoSize = true, ColumnCount = 2, RowCount = 11, BackColor = WindowTheme.Surface, Margin = new Padding(0) };
+        var list = new TableLayoutPanel { Dock = DockStyle.Top, AutoSize = true, ColumnCount = 2, BackColor = WindowTheme.Surface, Margin = new Padding(0) };
         list.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 190));
         list.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         string[,] keys = {
             {"F2 / 鼠标中键", "回手机主页"}, {"F3", "最近任务"}, {"F4 / F5", "展开 / 收起通知栏"},
             {"F6", "切换全屏"}, {"F7 / 鼠标右键", "返回"}, {"F8 / F9", "熄灭 / 点亮手机屏幕"},
             {"F1", "打开设备管理"}, {"Ctrl+R / 托盘菜单", "旋转手机屏幕"}, {"左 Alt + ↑ / ↓", "调节手机音量"},
-            {"Ctrl + 左键拖动", "双指缩放"}, {"滚轮", "回到主页"}
+            {"Ctrl + 左键拖动", "双指缩放"}, {"滚轮", "滚动页面"},
+            {"左 Alt + Shift + R", "刷新当前投屏画面"}
         };
         for (int i = 0; i < keys.GetLength(0); i++)
         {
@@ -731,15 +710,15 @@ internal sealed class DeviceSettings : Form
 
     private Panel QualityPage()
     {
-        var cards = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 3, Padding = new Padding(0, 0, 0, 4), Margin = new Padding(0) };
+        var cards = new TableLayoutPanel { Dock = DockStyle.Top, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, ColumnCount = 2, RowCount = 3, Padding = new Padding(0, 0, 0, 4), Margin = new Padding(0) };
         cards.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
         cards.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
-        for (int row = 0; row < 3; row++) cards.RowStyles.Add(new RowStyle(SizeType.Percent, 100f / 3));
+        for (int row = 0; row < 3; row++) cards.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         cards.Controls.Add(SliderCard("分辨率上限", "按手机屏幕长边计算", 480, 3840, draft.Size, n => n + " px", n => draft.Size = n, out sizeSlider, out sizeReading), 0, 0);
         cards.Controls.Add(SliderCard("帧率上限", "帧率越高，动作越顺", 15, 120, draft.Fps, n => n + " fps", n => draft.Fps = n, out fpsSlider, out fpsReading), 1, 0);
         cards.Controls.Add(SliderCard("视频码率", "卡顿时可先调低这一项", 5, 300, draft.Bitrate, n => (n / 10m).ToString("0.0") + " Mbps", n => draft.Bitrate = n, out bitrateSlider, out bitrateReading), 0, 1);
         cards.Controls.Add(SliderCard("视频缓冲", "网络波动时适当加大，延迟也会增加", 0, 250, draft.VideoBuffer, n => n + " ms", n => draft.VideoBuffer = n, out videoBufferSlider, out videoBufferReading), 1, 1);
-        cards.Controls.Add(SliderCard("声音缓冲", "声音断续时可适当调高", 20, 250, draft.AudioBuffer, n => n + " ms", n => draft.AudioBuffer = n, out audioBufferSlider, out audioBufferReading), 0, 2);
+        cards.Controls.Add(SliderCard("声音缓冲", "噪点、爆音或断续时调高；建议 80–120ms", 60, 250, draft.AudioBuffer, n => n + " ms", n => draft.AudioBuffer = n, out audioBufferSlider, out audioBufferReading), 0, 2);
         var recovery = SettingCard("断线自动重连", "投屏中断后只尝试恢复原设备");
         var toggle = new AntdUI.Switch { Checked = draft.AutoReconnect, Fill = WindowTheme.Accent, Width = 56, Height = 32, AccessibleName = "断线自动重连", Anchor = AnchorStyles.Left };
         toggle.CheckedChanged += delegate { draft.AutoReconnect = toggle.Checked; };
@@ -752,7 +731,9 @@ internal sealed class DeviceSettings : Form
         host.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         host.Controls.Add(PresetBar(), 0, 0);
         host.Controls.Add(OptionsBar(), 0, 1);
-        host.Controls.Add(cards, 0, 2);
+        var viewport = new Panel { Dock = DockStyle.Fill, AutoScroll = true, Margin = new Padding(0) };
+        viewport.Controls.Add(cards);
+        host.Controls.Add(viewport, 0, 2);
         UpdateAudioUi();
 
         var footer = new TableLayoutPanel { AutoSize = true, ColumnCount = 1, RowCount = 2, Padding = new Padding(0, 6, 0, 0), Margin = new Padding(0) };
@@ -898,11 +879,14 @@ internal sealed class DeviceSettings : Form
 
     private void EnableLowLatency()
     {
-        ApplyPreset(StreamPresets.All[1]);
+        ApplyPreset(StreamPresets.Game);
         if (active == null)
         {
             draft.Save();
-            SetNotice("已启用游戏低延迟：0ms 视频缓冲、90fps。鼠标保持普通桌面指针，不会被窗口捕获。", WindowTheme.Green);
+            if (SettingsSaved != null)
+                foreach (var device in devices.SelectedItems.Cast<DeviceRecord>().ToArray())
+                    SettingsSaved(device, draft.Copy());
+            SetNotice("已应用「" + StreamPresets.Game.Name + "」，最高 " + draft.Fps + " fps。", WindowTheme.Green);
         }
         else SaveProfile();
     }
@@ -920,9 +904,21 @@ internal sealed class DeviceSettings : Form
             button.Size = new Size(100, 36);
             button.Margin = new Padding(0, 0, 8, 4);
             tooltips.SetToolTip(button, current.Description);
+            presetButtons.Add(current, button);
             bar.Controls.Add(button);
         }
+        UpdatePresetSelection();
         return bar;
+    }
+
+    private void UpdatePresetSelection()
+    {
+        foreach (var pair in presetButtons)
+        {
+            bool selected = pair.Key.Matches(draft);
+            pair.Value.Type = selected ? AntdUI.TTypeMini.Primary : AntdUI.TTypeMini.Default;
+            pair.Value.DefaultBack = pair.Value.BackColor = selected ? WindowTheme.Accent : WindowTheme.Surface;
+        }
     }
 
     private void ApplyPreset(StreamPreset preset)
@@ -947,12 +943,12 @@ internal sealed class DeviceSettings : Form
 
     private static TableLayoutPanel SettingCard(string title, string hint)
     {
-        var card = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 3, BackColor = WindowTheme.Surface, Padding = new Padding(13, 10, 10, 7), Margin = new Padding(0, 0, 10, 10) };
+        var card = new TableLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, ColumnCount = 2, RowCount = 3, BackColor = WindowTheme.Surface, Padding = new Padding(13, 10, 10, 7), Margin = new Padding(0, 0, 10, 10) };
         card.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         card.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 100));
-        card.RowStyles.Add(new RowStyle(SizeType.Absolute, 24));
-        card.RowStyles.Add(new RowStyle(SizeType.Absolute, 23));
-        card.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        card.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        card.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        card.RowStyles.Add(new RowStyle(SizeType.Absolute, 42));
         var heading = TextLabel(title, 10.6f, WindowTheme.Ink, true);
         var description = TextLabel(hint, 8.7f, WindowTheme.Faint);
         card.Controls.Add(heading, 0, 0);
@@ -961,11 +957,11 @@ internal sealed class DeviceSettings : Form
         return card;
     }
 
-    private static Control SliderCard(string title, string hint, int minimum, int maximum, int value,
+    private Control SliderCard(string title, string hint, int minimum, int maximum, int value,
         Func<int, string> format, Action<int> update, out AntdUI.Slider slider, out Label reading)
     {
         var card = SettingCard(title, hint);
-        var readingControl = new Label { Text = format(value), AutoSize = false, Dock = DockStyle.Fill, ForeColor = WindowTheme.AccentLight, Font = new Font("Microsoft YaHei UI", 9.5f, FontStyle.Bold), TextAlign = ContentAlignment.TopRight, Margin = new Padding(0) };
+        var readingControl = new Label { Text = format(value), AutoSize = true, Dock = DockStyle.Fill, ForeColor = WindowTheme.AccentLight, Font = new Font("Microsoft YaHei UI", 9.5f, FontStyle.Bold), TextAlign = ContentAlignment.TopRight, Margin = new Padding(0) };
         reading = readingControl;
         card.Controls.Add(readingControl, 1, 0);
         var sliderControl = new AntdUI.Slider
@@ -982,7 +978,7 @@ internal sealed class DeviceSettings : Form
             AccessibleName = title
         };
         slider = sliderControl;
-        sliderControl.ValueChanged += delegate { readingControl.Text = format(sliderControl.Value); update(sliderControl.Value); };
+        sliderControl.ValueChanged += delegate { readingControl.Text = format(sliderControl.Value); update(sliderControl.Value); UpdatePresetSelection(); };
         card.Controls.Add(sliderControl, 0, 2);
         card.SetColumnSpan(sliderControl, 2);
         return card;
@@ -1135,8 +1131,19 @@ internal sealed class DeviceSettings : Form
         connect.Text = selected.Length > 1 ? "打开所选" :
             row != null && GetStreamStatus(row) != null ? "切到投屏" : "打开投屏";
         delete.Enabled = selected.Length > 0;
-        rename.Enabled = row != null && row.Id != null;
-        history.Enabled = row != null && row.LastUsed != DateTime.MinValue;
+        rename.Enabled = selected.Length == 1 && row.Id != null;
+        history.Enabled = selected.Length == 1 && row.LastUsed != DateTime.MinValue;
+        if (selected.Length > 1)
+        {
+            int online = selected.Count(item => item.Online);
+            artwork.ShowStatus(online > 0);
+            chosenName.Text = "已选 " + selected.Length + " 台设备";
+            chosenState.Visible = false;
+            chosenAddress.Text = online + " 台在线 · " + (selected.Length - online) + " 台离线";
+            chosenDetail.Text = String.Join("\n", selected.Select(item => item.Name));
+            detailTip.Text = "按住 Ctrl 点击设备，可增减选择。";
+            return;
+        }
         artwork.ShowStatus(row != null && row.Online);
         chosenName.Text = row == null ? "尚未选中设备" : row.Name;
         chosenState.Visible = row != null;
@@ -1211,9 +1218,36 @@ internal sealed class DeviceSettings : Form
         RefreshFromButton();
     }
 
-    private async Task RefreshDevicesAsync(string successMessage = null)
+    private async Task DetectDeviceChanges()
     {
-        if (scanning || IsDisposed) return;
+        if (scanning || checkingTransports || currentPage != 0 || !ContainsFocus || IsDisposed) return;
+        checkingTransports = true;
+        try
+        {
+            var before = knownTransports;
+            var current = await Task.Run(delegate { return String.Join("\n", DeviceDirectory.WirelessTransports()); });
+            if (!IsDisposed && !scanning && currentPage == 0 && ContainsFocus &&
+                before == knownTransports && current != knownTransports)
+                await RefreshDevicesAsync(null, true);
+        }
+        catch (System.IO.IOException) { /* Keep the last list while ADB restarts. */ }
+        catch (TimeoutException) { /* Retry on the next visible tick. */ }
+        catch (Exception error)
+        {
+            discovery.Stop();
+            AppLog.Error("自动发现设备已暂停", error);
+        }
+        finally { checkingTransports = false; }
+    }
+
+    private async Task RefreshDevicesAsync(DeviceRecord paired = null, bool automatic = false)
+    {
+        if (IsDisposed) return;
+        if (scanning)
+        {
+            if (paired != null) pendingPairedDevice = paired;
+            return;
+        }
         scanning = true;
         statusTimer.Stop();
         refresh.Loading = true;
@@ -1228,18 +1262,32 @@ internal sealed class DeviceSettings : Form
         }
         try
         {
-            var updated = await Task.Run(delegate { return directory.Scan(); });
+            string observed = null;
+            var updated = await Task.Run(delegate { return directory.Scan(out observed); });
             if (IsDisposed) return;
-            if (!updated.Any(item => item.Online) && !IsDisposed)
+            if (!automatic && !updated.Any(item => item.Online) && !IsDisposed)
             {
                 AppLog.Info("首次扫描没有在线设备，1.2 秒后自动重试一次");
                 await Task.Delay(1200);
                 if (IsDisposed) return;
-                updated = await Task.Run(delegate { return directory.Scan(); });
+                updated = await Task.Run(delegate { return directory.Scan(out observed); });
                 if (IsDisposed) return;
             }
+            knownTransports = observed;
             Fill(updated);
-            if (!String.IsNullOrEmpty(successMessage)) SetNotice(successMessage, WindowTheme.Green);
+            if (paired != null)
+            {
+                int index = updated.FindIndex(row => row.Id == paired.Id);
+                if (index >= 0)
+                {
+                    devices.ClearSelected();
+                    devices.SetSelected(index, true);
+                    devices.TopIndex = index;
+                }
+                if (index >= 0 && updated[index].Online)
+                    SetNotice("已选中「" + updated[index].Name + "」，双击即可投屏。", WindowTheme.Green);
+                else SetNotice("「" + paired.Name + "」已保存，当前离线。", WindowTheme.Amber);
+            }
             else if (updated.Count == 0 || !updated.Any(item => item.Online))
                 SetNotice("扫描完成，没有发现在线设备。打开无线调试，或使用扫码 / 六位码配对。", WindowTheme.Amber);
             else
@@ -1265,6 +1313,12 @@ internal sealed class DeviceSettings : Form
                 refresh.Loading = false;
                 refresh.Enabled = true;
             }
+        }
+        if (!IsDisposed && pendingPairedDevice != null)
+        {
+            var pending = pendingPairedDevice;
+            pendingPairedDevice = null;
+            await RefreshDevicesAsync(pending);
         }
     }
 
@@ -1358,26 +1412,35 @@ internal sealed class DeviceSettings : Form
 
     private void Fill(List<DeviceRecord> updated)
     {
-        var previous = Current();
-        string previousSerial = previous == null ? null : previous.Serial;
+        var previous = devices.SelectedItems.Cast<DeviceRecord>().ToArray();
+        var ids = new HashSet<string>(previous.Where(item => !String.IsNullOrEmpty(item.Id)).Select(item => item.Id));
+        var serials = new HashSet<string>(previous.Where(item => String.IsNullOrEmpty(item.Id) && item.Online).Select(item => item.Serial));
         rows = updated ?? new List<DeviceRecord>();
+        fillingDevices = true;
         devices.BeginUpdate();
         try
         {
             devices.Items.Clear();
-            foreach (var row in rows) devices.Items.Add(row);
-            int index = -1;
-            if (previous != null && previous.Id != null)
-                index = rows.FindIndex(row => row.Id == previous.Id);
-            if (index < 0 && previousSerial != null)
-                index = rows.FindIndex(row => row.Serial == previousSerial);
-            if (index < 0) index = rows.FindIndex(row => row.Online);
-            if (index < 0 && rows.Count > 0) index = 0;
-            devices.SelectedIndex = index;
+            foreach (var row in rows)
+            {
+                int index = devices.Items.Add(row);
+                if (ids.Contains(row.Id) || serials.Contains(row.Serial))
+                    devices.SetSelected(index, true);
+            }
+            if (devices.SelectedIndex < 0 && rows.Count > 0)
+                devices.SelectedIndex = Math.Max(0, rows.FindIndex(row => row.Online));
         }
-        finally { devices.EndUpdate(); }
+        finally
+        {
+            devices.EndUpdate();
+            fillingDevices = false;
+        }
         emptyHint.Visible = rows.Count == 0;
-        if (rows.Count == 0) emptyHint.BringToFront();
+        if (rows.Count == 0)
+        {
+            emptyHint.Text = "暂无设备\n开启手机无线调试后，扫码或输入六位配对码。";
+            emptyHint.BringToFront();
+        }
         int online = rows.Count(item => item.Online);
         summary = rows.Count == 0
             ? "暂无设备。打开手机无线调试，或使用扫码 / 六位码配对。"
@@ -1406,6 +1469,7 @@ internal sealed class DeviceSettings : Form
     {
         if (disposing)
         {
+            discovery.Dispose();
             statusTimer.Dispose();
             tooltips.Dispose();
             deviceNameFont.Dispose();

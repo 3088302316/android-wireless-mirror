@@ -12,7 +12,8 @@ internal sealed class MirrorKeys : IDisposable
     private readonly KeyboardHook callback;
     private readonly Process mirror;
     private readonly string serial;
-    private readonly AudioRoute audio;
+    private readonly ConnectionProfile profile;
+    private readonly Action<StreamPreset> changePreset;
     private readonly Action<AudioRoute> changeAudio;
     private IntPtr hook;
     private int settingsPage;
@@ -34,19 +35,21 @@ internal sealed class MirrorKeys : IDisposable
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode)]
     private static extern IntPtr GetModuleHandle(string name);
 
-    public MirrorKeys(Process mirror, string serial, AudioRoute audio, Action<AudioRoute> changeAudio)
+    public MirrorKeys(Process mirror, string serial, ConnectionProfile profile, Action<AudioRoute> changeAudio, Action<StreamPreset> changePreset)
     {
         this.mirror = mirror;
         this.serial = serial;
-        this.audio = audio;
+        this.profile = profile;
+        this.changePreset = changePreset;
         this.changeAudio = changeAudio;
         callback = HandleKey;
         hook = SetWindowsHookEx(13, callback, GetModuleHandle(null), 0);
     }
 
-    public async Task RunAsync(string deviceName, Action<IntPtr> rememberConnection, Action<int> showSettings, MirrorMenuSignal menuSignal)
+    public async Task RunAsync(string deviceName, bool locked, Action<IntPtr> rememberConnection, Action<int> showSettings, MirrorMenuSignal menuSignal)
     {
         bool recorded = false;
+        IntPtr window = IntPtr.Zero;
         var exited = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
         using (var icon = WirelessMirror.LoadIcon())
         using (var menu = CreateMenu())
@@ -56,8 +59,10 @@ internal sealed class MirrorKeys : IDisposable
             tray.DoubleClick += delegate { settingsPage = 1; };
             timer.Tick += delegate
             {
-                IntPtr window = WirelessMirror.MirrorWindow(mirror);
                 if (mirror.HasExited) { timer.Stop(); exited.TrySetResult(true); return; }
+                uint owner;
+                if (window == IntPtr.Zero || GetWindowThreadProcessId(window, out owner) == 0 || owner != (uint)mirror.Id)
+                    window = WirelessMirror.MirrorWindow(mirror);
                 int nativePage = menuSignal.TakePage(window);
                 if (nativePage != 0) settingsPage = nativePage;
                 bool ready = !recorded && window != IntPtr.Zero;
@@ -76,7 +81,7 @@ internal sealed class MirrorKeys : IDisposable
                             tray.ShowBalloonTip(4000, "手机投屏",
                                 "本次连接记录未能保存：" + historyError.Message, ToolTipIcon.Warning);
                         }
-                        if (WirelessMirror.IsLocked(serial))
+                        if (locked)
                             tray.ShowBalloonTip(6000, "手机已锁屏",
                                 "锁屏密码界面受 Android 保护，不能投屏。请在手机上解锁，画面会自动恢复。",
                                 ToolTipIcon.Warning);
@@ -106,12 +111,23 @@ internal sealed class MirrorKeys : IDisposable
         rotate.Click += delegate { Task.Run(delegate { Rotate(); }); };
         menu.Items.Add(rotate);
         menu.Items.Add("恢复自动旋转", null, delegate { Task.Run(delegate { AutoRotate(); }); });
+        var quality = new ToolStripMenuItem("本次投屏画质");
+        foreach (var preset in StreamPresets.All)
+        {
+            var choice = preset;
+            var item = new ToolStripMenuItem(choice.Name);
+            item.Checked = choice.Matches(profile);
+            item.ToolTipText = choice.Description;
+            item.Click += delegate { changePreset(choice); };
+            quality.DropDownItems.Add(item);
+        }
+        menu.Items.Add(quality);
         var audioMenu = new ToolStripMenuItem("声音输出");
         foreach (var option in new[] { AudioRoute.Pc, AudioRoute.Phone, AudioRoute.Both, AudioRoute.None })
         {
             var route = option;
             var item = new ToolStripMenuItem(ConnectionProfile.AudioLabel(route));
-            item.Checked = audio == route;
+            item.Checked = profile.Audio == route;
             item.Click += delegate { if (changeAudio != null) changeAudio(route); };
             audioMenu.DropDownItems.Add(item);
         }

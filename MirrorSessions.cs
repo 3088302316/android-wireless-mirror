@@ -16,6 +16,10 @@ internal sealed class MirrorSessions : IDisposable
         public ConnectionProfile Profile;
         public Process Process;
         public Form Recovery;
+        public IntPtr Window;
+        public Rectangle Bounds;
+        public bool Maximized;
+        public bool Counted;
         public bool HasWindow;
         public bool RestartRequested;
     }
@@ -39,6 +43,17 @@ internal sealed class MirrorSessions : IDisposable
     [DllImport("user32.dll", CharSet = CharSet.Unicode)]
     private static extern bool SetWindowText(IntPtr window, string title);
 
+    [DllImport("user32.dll")]
+    private static extern bool IsIconic(IntPtr window);
+    [DllImport("user32.dll")]
+    private static extern bool IsZoomed(IntPtr window);
+    [DllImport("user32.dll")]
+    private static extern bool ShowWindowAsync(IntPtr window, int command);
+    [DllImport("user32.dll")]
+    private static extern IntPtr GetForegroundWindow();
+    [DllImport("user32.dll")]
+    private static extern uint GetWindowThreadProcessId(IntPtr window, out uint processId);
+
     public MirrorSessions(DeviceDirectory directory, DeviceSettings center, EventWaitHandle openSettings)
     {
         this.directory = directory;
@@ -48,7 +63,14 @@ internal sealed class MirrorSessions : IDisposable
         center.SettingsSaved += ApplySavedProfile;
         center.StreamStatus = Status;
         center.FormClosed += delegate { Dispose(); };
-        activation.Tick += delegate { if (openSettings.WaitOne(0)) ShowCenter(); };
+        int ticks = 0;
+        activation.Tick += delegate
+        {
+            if (openSettings.WaitOne(0)) ShowCenter();
+            if (++ticks < 5) return;
+            ticks = 0;
+            foreach (var session in sessions.Values) RememberWindow(session);
+        };
         activation.Start();
     }
 
@@ -107,7 +129,8 @@ internal sealed class MirrorSessions : IDisposable
             if (!closing)
             {
                 center.RefreshStreamStatus();
-                ShowCenter();
+                if (!sessions.Values.Any(item => item.Window != IntPtr.Zero && item.Window == GetForegroundWindow()))
+                    ShowCenter();
             }
         }
     }
@@ -115,15 +138,19 @@ internal sealed class MirrorSessions : IDisposable
     private async Task Run(Session session)
     {
         int retries = 2;
+        bool softwareDecoding = false;
         while (!closing)
         {
             var device = session.Device;
             string serial = device.Serial;
+            bool locked = false;
             bool valid = await Task.Run(delegate
             {
-                return serial != null && DeviceDirectory.IsWirelessSerial(serial) &&
+                bool connected = serial != null && DeviceDirectory.IsWirelessSerial(serial) &&
                     WirelessMirror.Adb("-s " + serial + " get-state") == "device" &&
                     DeviceDirectory.ReadId(serial) == device.Id;
+                if (connected) locked = WirelessMirror.IsLocked(serial);
+                return connected;
             });
             if (closing) return;
             if (!valid)
@@ -132,36 +159,51 @@ internal sealed class MirrorSessions : IDisposable
                 return;
             }
 
-            ConnectionProfile replacement = null;
             int exitCode;
+            bool closeRequested;
             var elapsed = Stopwatch.StartNew();
             using (var signal = new MirrorMenuSignal())
-            using (var mirror = WirelessMirror.StartMirror(device, session.Profile, signal))
+            using (var mirror = WirelessMirror.StartMirror(device, session.Profile, signal, locked, softwareDecoding))
             using (var telemetry = session.Profile.ShowStats ? new MirrorTelemetry(mirror, serial) : null)
-            using (var keys = new MirrorKeys(mirror, serial, session.Profile.Audio, delegate(AudioRoute route)
+            using (var keys = new MirrorKeys(mirror, serial, session.Profile, delegate(AudioRoute route)
             {
                 if (session.Profile.Audio == route) return;
                 var updated = session.Profile.Copy();
                 updated.Audio = route;
-                try { updated.Save(); }
+                try
+                {
+                    var defaults = ConnectionProfile.Load();
+                    defaults.Audio = route;
+                    defaults.Save();
+                }
                 catch (Exception error)
                 {
                     AppLog.Warn("保存声音输出设置失败: " + error.Message);
                     return;
                 }
-                replacement = updated;
-                Stop(mirror);
+                ApplySavedProfile(device, updated);
+            }, delegate(StreamPreset preset)
+            {
+                var updated = session.Profile.Copy();
+                preset.Apply(updated);
+                ApplySavedProfile(device, updated);
             }))
             {
                 session.Process = mirror;
                 try
                 {
-                    await keys.RunAsync(device.Name, delegate(IntPtr window)
+                    await keys.RunAsync(device.Name, locked, delegate(IntPtr window)
                     {
                         session.HasWindow = true;
                         if (telemetry != null) telemetry.Start();
-                        PositionWindow(window);
-                        directory.RememberConnection(device);
+                        session.Window = window;
+                        if (!RestoreWindow(session)) PositionWindow(window);
+                        RememberWindow(session);
+                        if (!session.Counted)
+                        {
+                            directory.RememberConnection(device);
+                            session.Counted = true;
+                        }
                         center.RefreshStreamStatus(device);
                     }, delegate(int page)
                     {
@@ -174,19 +216,15 @@ internal sealed class MirrorSessions : IDisposable
                             if (settings.ShowDialog(center) != DialogResult.OK || closing) return;
                             var chosen = settings.SavedProfile;
                             if (chosen == null) return;
-                            replacement = chosen;
-                            session.Profile = chosen;
-                            AppLog.Info("连接设置已保存，重启当前投屏: " + device.Name);
-                            // CloseMainWindow() can be ignored by the custom scrcpy
-                            // window; Stop() guarantees the old process is gone
-                            // before the loop starts the new profile.
-                            Stop(mirror);
+                            ApplySavedProfile(device, chosen);
                         }
                     }, signal);
                     exitCode = mirror.ExitCode;
+                    closeRequested = signal.CloseRequested;
                 }
                 finally
                 {
+                    session.Window = IntPtr.Zero;
                     session.Process = null;
                     session.HasWindow = false;
                     if (!mirror.HasExited) Stop(mirror);
@@ -202,11 +240,14 @@ internal sealed class MirrorSessions : IDisposable
                 center.RefreshStreamStatus();
                 continue;
             }
-            if (replacement != null)
+            if (elapsed.Elapsed >= TimeSpan.FromMinutes(1)) retries = 2;
+            if (closeRequested || exitCode == 0) return;
+
+            if (exitCode == unchecked((int)0xC0000005) && session.Profile.AutoReconnect && !softwareDecoding)
             {
-                session.Profile = replacement;
-                retries = 2;
-                center.RefreshStreamStatus();
+                softwareDecoding = true;
+                AppLog.Warn("投屏进程异常退出，改用软件解码恢复当前会话: " + device.Name);
+                center.ReportStream(device.Name + " 的播放进程意外退出，正在使用软件解码恢复画面。", WindowTheme.Amber);
                 continue;
             }
 
@@ -228,10 +269,43 @@ internal sealed class MirrorSessions : IDisposable
                 }
             }
 
-            if (exitCode != 0 && elapsed.Elapsed < TimeSpan.FromSeconds(6))
-                center.ReportStream(device.Name + " 投屏启动失败，请确认无线调试已开启。", WindowTheme.Red);
+            if (exitCode == 2)
+                center.ReportStream(device.Name + " 的无线连接已中断。", WindowTheme.Amber);
+            else
+                center.ReportStream(device.Name + " 播放进程已退出（0x" + exitCode.ToString("X8") +
+                    "）。可在连接设置中打开日志。", WindowTheme.Red);
             return;
         }
+    }
+
+    private static void RememberWindow(Session session)
+    {
+        IntPtr window = session.Window;
+        uint owner;
+        if (window == IntPtr.Zero || session.Process == null || IsIconic(window) ||
+            GetWindowThreadProcessId(window, out owner) == 0 || owner != (uint)session.Process.Id) return;
+        WindowRect native;
+        if (!GetWindowRect(window, out native)) return;
+        var bounds = Rectangle.FromLTRB(native.Left, native.Top, native.Right, native.Bottom);
+        if (bounds.Width <= 0 || bounds.Height <= 0 || bounds == Screen.FromHandle(window).Bounds) return;
+        session.Maximized = IsZoomed(window);
+        if (!session.Maximized) session.Bounds = bounds;
+    }
+
+    private static bool RestoreWindow(Session session)
+    {
+        if (session.Bounds.IsEmpty) return false;
+        Rectangle previous = session.Bounds;
+        Rectangle work = Screen.FromRectangle(previous).WorkingArea;
+        double scale = Math.Min(1, Math.Min((double)work.Width / previous.Width,
+                                             (double)work.Height / previous.Height));
+        int width = Math.Max(1, (int)(previous.Width * scale));
+        int height = Math.Max(1, (int)(previous.Height * scale));
+        int x = Math.Max(work.Left, Math.Min(previous.X, work.Right - width));
+        int y = Math.Max(work.Top, Math.Min(previous.Y, work.Bottom - height));
+        bool restored = SetWindowPos(session.Window, IntPtr.Zero, x, y, width, height, 0x14);
+        if (restored && session.Maximized) ShowWindowAsync(session.Window, 3);
+        return restored;
     }
 
     private void PositionWindow(IntPtr window)
@@ -269,17 +343,34 @@ internal sealed class MirrorSessions : IDisposable
         SetWindowPos(window, IntPtr.Zero, cascadeX, cascadeY, 0, 0, 0x15);
     }
 
-    private void ApplySavedProfile(DeviceRecord device, ConnectionProfile profile)
+    private async void ApplySavedProfile(DeviceRecord device, ConnectionProfile profile)
     {
         if (closing || device == null || device.Id == null || profile == null) return;
         Session session;
         if (!sessions.TryGetValue(device.Id, out session)) return;
+        var runningProfile = session.Profile;
+        bool restart = runningProfile.Options != profile.Options;
         session.Profile = profile.Copy();
-        if (session.Process != null && !session.Process.HasExited)
+        var process = session.Process;
+        if (!restart || session.RestartRequested || process == null || process.HasExited) return;
+        RememberWindow(session);
+        session.RestartRequested = true;
+        AppLog.Info("应用新的投屏参数: " + device.Name);
+        try
         {
-            session.RestartRequested = true;
-            AppLog.Info("设备中心设置已保存，重启投屏: " + device.Name);
-            Stop(session.Process);
+            if (process.CloseMainWindow()) await Task.Delay(1200);
+            if (session.Process == process && !process.HasExited) process.Kill();
+        }
+        catch (InvalidOperationException) { /* Already exited. */ }
+        catch (Exception error)
+        {
+            if (session.Process == process)
+            {
+                session.Profile = runningProfile;
+                session.RestartRequested = false;
+                if (!closing) center.ReportStream("无法重启投屏，请关闭该窗口后再打开。", WindowTheme.Amber);
+            }
+            AppLog.Error("重新启动投屏失败", error);
         }
     }
 
